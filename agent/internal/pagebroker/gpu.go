@@ -342,7 +342,7 @@ func (g *CustomStorageExecution) Abort(ctx context.Context) error {
 		}
 		// The pinned receiver can forget a transaction only after GPU work has
 		// drained. A replacement rejects our broker pidfd before checking the ID.
-		var failure failureError
+		var failure *FailureError
 		if errors.As(err, &failure) && failure.code == Failure_TRANSACTION_NOT_FOUND {
 			g.aborted = true
 			return err
