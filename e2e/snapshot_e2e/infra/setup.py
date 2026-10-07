@@ -964,6 +964,10 @@ def snapshot_chart_command(
             f"storage.pvc.name={pvc_name}",
             "--set",
             "operator.artifactCleanup.scanInterval=5s",
+            "--set",
+            "pageBroker.artifactAddressing=true",
+            "--set",
+            "operator.bindNewContents=true",
             "--set-json",
             "daemonset.imagePullSecrets=[]",
         ]
@@ -992,6 +996,7 @@ def install_snapshot_chart(
 ) -> None:
     source = f"{chart} {chart_version}" if chart_version else chart
     log(f"Installing Snapshot chart release {namespace}/{release} from {source}")
+    # Lifecycle tests require bound publications; setup waits for every agent before testing.
     command = snapshot_chart_command(
         namespace=namespace,
         release=release,

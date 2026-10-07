@@ -64,7 +64,7 @@ def test_overrides_are_appended_after_chart_defaults(monkeypatch):
     )
 
 
-def test_install_without_overrides_is_unchanged(monkeypatch):
+def test_install_enables_bound_publications_for_the_lifecycle_suite(monkeypatch):
     commands = []
     monkeypatch.setattr(setup, "run", lambda command, **_: commands.append(command))
 
@@ -78,6 +78,8 @@ def test_install_without_overrides_is_unchanged(monkeypatch):
     )
 
     (command,) = commands
+    assert "pageBroker.artifactAddressing=true" in command
+    assert "operator.bindNewContents=true" in command
     assert command[-2:] == ["--set-json", "daemonset.imagePullSecrets=[]"]
 
 
