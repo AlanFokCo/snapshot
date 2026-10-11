@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-suite: restore proxy NRI mount
+suite: restore proxy NRI plugin
 templates:
   - templates/daemonset.yaml
 tests:
@@ -21,3 +21,21 @@ tests:
             hostPath:
               path: /var/run/nri
               type: DirectoryOrCreate
+
+  - it: acts on every restore Pod by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].env
+          content:
+            name: SNAPSHOT_NRI_HOST_NAMESPACE
+          any: true
+
+  - it: limits the NRI plugin to one host namespace
+    set:
+      daemonset.nriHostNamespace: snapshot-e2e-vc
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].env
+          content:
+            name: SNAPSHOT_NRI_HOST_NAMESPACE
+            value: snapshot-e2e-vc

@@ -97,7 +97,7 @@ func main() {
 		return untilShutdown(rootCtx, "snapshot node controller", nodeController.Run(groupCtx))
 	})
 	if nriEnabled {
-		plugin := nri.NewPlugin(nodeController, rootLog.WithName("nri"))
+		plugin := nri.NewPlugin(nodeController, rootLog.WithName("nri"), os.Getenv(nri.HostNamespaceEnv))
 		group.Go(func() error {
 			return untilShutdown(rootCtx, "NRI plugin", plugin.Run(groupCtx))
 		})

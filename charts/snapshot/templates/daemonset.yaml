@@ -172,6 +172,10 @@ spec:
                   fieldPath: spec.nodeName
             - name: SNAPSHOT_LOG_LEVEL
               value: {{ .Values.daemonset.snapshotLogLevel | quote }}
+            {{- with .Values.daemonset.nriHostNamespace }}
+            - name: SNAPSHOT_NRI_HOST_NAMESPACE
+              value: {{ . | quote }}
+            {{- end }}
             # Conventional CUDA queries need the host driver libraries.
             {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
           volumeMounts:

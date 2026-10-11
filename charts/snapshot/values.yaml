@@ -145,6 +145,12 @@ daemonset:
   # Agent and nsrestore log level (trace, debug, info, warn, error)
   snapshotLogLevel: info
 
+  # For tests on nodes shared with other clusters, such as vCluster tenants.
+  # The agent then makes the restore proxy PID 1 only in Pods of this host
+  # namespace, and leaves other clusters' restore Pods alone. Empty: every
+  # restore Pod on the node, the only supported setup in production.
+  nriHostNamespace: ""
+
   # The shipped agent image is public on GHCR. Set this only when an image
   # override is hosted in a private registry.
   imagePullSecrets: []

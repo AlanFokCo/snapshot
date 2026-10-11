@@ -22,6 +22,7 @@ import (
 	"github.com/containerd/nri/pkg/stub"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
@@ -35,11 +36,14 @@ const (
 	PluginName  = "snapshot"
 	PluginIndex = "50"
 
+	// HostNamespaceEnv holds the agent's host namespace for NewPlugin.
+	HostNamespaceEnv = "SNAPSHOT_NRI_HOST_NAMESPACE"
+
 	// ProxyBinaryPath is where the agent image ships the proxy.
 	ProxyBinaryPath = nsmount.SnapshotBinSrc + "/" + podcontract.RestoreProxyBinaryName
 
-	// lookupTimeout bounds the API reads for one container. They run inside
-	// the runtime's CreateContainer call, which NRI also bounds.
+	// lookupTimeout bounds the API read for Pods without a container map. It
+	// runs inside the runtime's CreateContainer call, which NRI also bounds.
 	lookupTimeout = time.Second
 )
 
@@ -56,28 +60,31 @@ const (
 // is mounted at SnapshotControlMountPath.
 var proxyCommand = []string{path.Join(podcontract.SnapshotControlMountPath, podcontract.RestoreProxyBinaryName)}
 
-// DestinationResolver finds restore Pods in the agent's own cluster, and the
-// containers they restore into.
+// DestinationResolver returns the containers a restore Pod restores into.
 type DestinationResolver interface {
-	// RestorePod returns nil if the agent's cluster has no such Pod.
-	RestorePod(ctx context.Context, namespace, name string, uid ktypes.UID) (*corev1.Pod, error)
 	RestoreDestinations(ctx context.Context, pod *corev1.Pod) ([]string, error)
 }
 
 // Plugin is the NRI plugin.
 type Plugin struct {
-	resolver DestinationResolver
-	log      logr.Logger
+	resolver      DestinationResolver
+	log           logr.Logger
+	hostNamespace string
 	// openControlDir and proxyPath are replaced in tests.
 	openControlDir func(podUID, containerName string) (*os.File, error)
 	proxyPath      string
 }
 
-// NewPlugin returns a plugin that resolves destinations through resolver.
-func NewPlugin(resolver DestinationResolver, log logr.Logger) *Plugin {
+// NewPlugin returns a plugin that resolves destinations through resolver. If
+// hostNamespace is set, the plugin acts only on Pods in that namespace on the
+// node. Tests set it, to share nodes with other clusters: the runtime calls
+// every plugin for every Pod on the node, and restore Pods of another cluster
+// would fail here. One vCluster's Pods all run in one host namespace.
+func NewPlugin(resolver DestinationResolver, log logr.Logger, hostNamespace string) *Plugin {
 	return &Plugin{
 		resolver:       resolver,
 		log:            log,
+		hostNamespace:  hostNamespace,
 		openControlDir: snapshotruntime.OpenPodControlDir,
 		proxyPath:      ProxyBinaryPath,
 	}
@@ -122,23 +129,20 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	if _, ok := pod.GetAnnotations()[podcontract.RestoreFromAnnotation]; !ok {
 		return nil, nil, nil
 	}
+	if p.hostNamespace != "" && pod.GetNamespace() != p.hostNamespace {
+		return nil, nil, nil
+	}
 	namespace, name, uid := podIdentity(pod)
 	log := p.log.WithValues("pod", namespace+"/"+name, "container", ctr.GetName())
 
 	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
-	// The runtime may also run Pods of other clusters that share the node.
-	// Those are left alone: their own Snapshot install, if any, handles them.
-	restorePod, err := p.resolver.RestorePod(lookupCtx, namespace, name, ktypes.UID(uid))
-	if err != nil {
-		log.Error(err, "Cannot look up restore Pod")
-		return nil, nil, fmt.Errorf("snapshot: look up restore Pod: %w", err)
-	}
-	if restorePod == nil {
-		log.V(1).Info("Restore Pod is not in this cluster; leaving it alone")
-		return nil, nil, nil
-	}
-	destinations, err := p.resolver.RestoreDestinations(lookupCtx, restorePod)
+	destinations, err := p.resolver.RestoreDestinations(lookupCtx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:        name,
+		Namespace:   namespace,
+		UID:         ktypes.UID(uid),
+		Annotations: pod.GetAnnotations(),
+	}})
 	if err != nil {
 		log.Error(err, "Cannot resolve restore destinations")
 		return nil, nil, fmt.Errorf("snapshot: resolve restore destinations: %w", err)
