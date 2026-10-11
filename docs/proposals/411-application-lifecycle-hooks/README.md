@@ -29,8 +29,6 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
   - [Test Plan](#test-plan)
   - [Graduation Criteria](#graduation-criteria)
 - [Appendix](#appendix)
-  - [Agent recovery](#agent-recovery)
-  - [Diagnostic fields](#diagnostic-fields)
   - [Detailed test coverage](#detailed-test-coverage)
   - [References](#references)
 <!-- /toc -->
@@ -254,22 +252,30 @@ type ApplicationProfileSpec struct {
 }
 
 type QuiesceProbe struct {
+	QuiesceProbeHandler `json:",inline"`
+
+	InitialDelaySeconds int32 `json:"initialDelaySeconds,omitempty"`
+	PeriodSeconds       int32 `json:"periodSeconds,omitempty"`
+	TimeoutSeconds      int32 `json:"timeoutSeconds,omitempty"`
+	SuccessThreshold    int32 `json:"successThreshold,omitempty"`
+}
+
+type QuiesceProbeHandler struct {
 	File    *ControlFileAction   `json:"file,omitempty"`
 	HTTPGet *LifecycleHTTPAction `json:"httpGet,omitempty"`
-
-	InitialDelaySeconds *int32 `json:"initialDelaySeconds,omitempty"`
-	PeriodSeconds       *int32 `json:"periodSeconds,omitempty"`
-	TimeoutSeconds      *int32 `json:"timeoutSeconds,omitempty"`
-	SuccessThreshold    *int32 `json:"successThreshold,omitempty"`
 }
 
 type RestoreRelease struct {
+	RestoreReleaseHandler `json:",inline"`
+
+	PeriodSeconds  int32 `json:"periodSeconds,omitempty"`
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+}
+
+type RestoreReleaseHandler struct {
 	File     *ControlFileAction   `json:"file,omitempty"`
 	HTTPPost *LifecycleHTTPAction `json:"httpPost,omitempty"`
 	Signal   *SignalAction        `json:"signal,omitempty"`
-
-	PeriodSeconds  *int32 `json:"periodSeconds,omitempty"`
-	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
 }
 
 type ControlFileAction struct {
@@ -282,7 +288,7 @@ type LifecycleHTTPAction struct {
 }
 
 type SignalAction struct {
-	Name string `json:"name"`
+	Signal string `json:"signal"`
 }
 ```
 
@@ -290,8 +296,6 @@ When present, `quiesceProbe` requires exactly one of `file` or `httpGet`, and
 `restoreRelease` requires exactly one of `file`, `httpPost`, or `signal`.
 Omitted actions follow the [proposal defaults](#defaults-and-user-probes).
 
-Probe handlers and timing fields follow the structure of
-[Kubernetes probes](https://kubernetes.io/docs/concepts/workloads/pods/probes/).
 Defaults are `initialDelaySeconds: 0`, `periodSeconds: 1`,
 `timeoutSeconds: 1`, and `successThreshold: 1`. The initial delay is nonnegative;
 other timing values and the success threshold must be positive. A release
@@ -315,6 +319,21 @@ the host from the target Pod IP. Host overrides, custom headers, and request
 bodies are not part of this API.
 Signal names are restricted to `SIGUSR1` and `SIGUSR2`.
 
+**Transport behavior**
+
+| Action | Success condition |
+| --- | --- |
+| File probe | The marker exists as a regular file. |
+| HTTP probe | GET returns `200`. |
+| File release | The agent atomically publishes the marker in the destination control directory. |
+| HTTP release | POST with an empty body returns `200` or `204`, acknowledging acceptance. Recovery may continue asynchronously. |
+| Signal release | The agent sends the signal to the verified restored process-tree root, not the placeholder process. Delivery does not acknowledge handler completion. |
+
+GET and POST response bodies are ignored; no attempt ID is sent. All unsuccessful
+HTTP release requests, including connection failures, are retried until the
+restore deadline. Signal handlers must be installed before capture. Shared HTTP
+endpoints receive no container identifier and must coordinate the required releases.
+
 For example, a cooperative application's profile can declare:
 
 ```yaml
@@ -327,6 +346,7 @@ spec:
     httpGet:
       path: /snapshot/quiesced
       port: 9001
+    initialDelaySeconds: 0
     periodSeconds: 1
     timeoutSeconds: 2
     successThreshold: 1
@@ -338,9 +358,20 @@ spec:
     timeoutSeconds: 2
 ```
 
-These paths illustrate the proposed application contract; they are not existing
-engine endpoints. A file profile instead uses `quiesceProbe.file.name:
-ready-for-snapshot` and `restoreRelease.file.name: restore-complete`.
+These paths illustrate the contract; they are not existing engine endpoints.
+A profile can also combine file readiness with signal release:
+
+```yaml
+spec:
+  quiesceProbe:
+    file:
+      name: ready-for-snapshot
+  restoreRelease:
+    signal:
+      signal: SIGUSR1
+```
+
+For file release, use `restoreRelease.file.name: restore-complete`.
 
 #### Checkpoint metadata
 
@@ -359,55 +390,51 @@ binding to its destination containers. Destination Pods do not select profiles.
 
 ### Capture and restore execution
 
-**Capture.** The agent resolves a selected profile at the start of an attempt
-and retains its definition across retries and agent restarts. An explicit
-`quiesceProbe` is the sole application capture gate: a regular file marker or
-HTTP GET status `200` indicates success. The application must clear stale file
-markers before initialization. Once the success threshold is reached, the agent
-revalidates source identity before capture.
+**Capture**
 
-The Pod readiness fallback includes other containers and readiness gates.
-Whichever signal is used, it must indicate that the application is safe to
-capture and will remain so until capture.
+```mermaid
+flowchart TD
+    A[Resolve selected profile or use defaults] --> B{Explicit quiesceProbe?}
+    B -->|Yes| C[Poll until successThreshold is reached]
+    B -->|No| D[Wait for whole-Pod Ready]
+    C --> E[Revalidate source identity]
+    D --> E
+    E --> F[Capture process and GPU state]
+```
 
-**Restore and release.** Recover existing attempts from their saved definitions
-before looking up profiles. Profile deletion or recreation does not change an
-active attempt, including after an agent restart.
+The agent saves the resolved profile for retries and restarts. A missing named
+profile never falls back to defaults. The application must clear stale readiness
+markers before initialization and remain safe once its capture signal succeeds.
+Pod readiness includes other containers and readiness gates.
 
-Before a new attempt, resolve the checkpoint's profile names to their current
-definitions and validate destination mappings. A missing named profile blocks
-restore before CRIU runs; reconciliation retries the lookup. Never fall back
-to the default behavior or a capture-time definition.
+**Restore and release**
 
-After successful CRIU and CUDA restore, perform the configured
-action for each destination:
+```mermaid
+flowchart TD
+    A[Restore request] --> B{Existing attempt?}
+    B -->|Yes| C[Recover recorded progress using saved definitions]
+    B -->|No| D[Resolve recorded profile names to current definitions]
+    D --> E{Profiles available?}
+    E -->|No| F[Wait and retry lookup]
+    F --> D
+    E -->|Yes| G[Restore container]
+    G --> H[Notify application if release is configured]
+    H --> I[Complete restore]
+```
 
-- **File:** atomically publish the marker in the destination's control directory.
-- **HTTP:** POST an empty body. Status `200` or `204` acknowledges acceptance
-  into the application's recovery logic; recovery may continue asynchronously.
-  All other statuses and connection failures are retried until the restore
-  deadline. GET and POST response bodies are ignored; no attempt ID is sent.
-- **Signal:** send `SIGUSR1` or `SIGUSR2` to the verified restored process-tree
-  root, not the placeholder process. The handler must be installed before
-  capture. Successful delivery does not acknowledge handler completion.
-- **Omitted:** proceed without an application notification.
+New attempts use current profile definitions, never capture-time definitions.
+Profile changes do not affect active attempts. The application must make release
+idempotent: a lost response or agent restart can cause repeat delivery. Release
+success does not mean the application is ready to serve. The
+[recovery flow](#recovery-guarantees) handles interrupted attempts and retries.
 
-The application must make release idempotent. Snapshot may repeat it after a
-lost response or agent restart. Snapshot records completion only after the
-configured action succeeds or is omitted.
+**Deadlines.** SnapshotJob's `activeDeadlineSeconds` bounds its source lifecycle.
+A direct PodSnapshot waits for capture readiness, request deletion, or source
+termination. Probe timeouts bound individual observations.
 
-HTTP requests address a Pod IP, port, and path without a container identifier.
-A shared endpoint must make each acknowledgment cover the required release.
-
-**Deadlines.** SnapshotJob's `activeDeadlineSeconds` bounds its source lifecycle,
-including capture readiness. A direct PodSnapshot waits until its capture gate
-succeeds, the request is deleted, or the source becomes terminal. Probe timeouts
-bound individual observations, not the total wait.
-
-The agent restore timeout covers runtime restoration and release. Persist its
-absolute deadline so retries and restarts cannot extend it. If the release step
-has not been recorded complete at that deadline, fail and clean up the
-destination; the application may have received a notification whose response
+The restore timeout covers runtime restoration and release. Its absolute deadline
+survives retries and restarts. If release completion is not recorded in time,
+fail and clean up, even if the application received a notification whose response
 was lost.
 
 #### Recovery guarantees
@@ -435,21 +462,24 @@ completion is recorded, marker or status failures require repair, not cleanup.
 
 Profile-based restores use agent-owned recovery records, not workload-written
 markers. Unprofiled restores without a record keep the legacy marker recovery
-path. The [agent recovery sequence](#agent-recovery) specifies persistence and
-startup-marker ordering.
+path.
 
 ### Security
 
-Only administrators can create, update, or delete profiles. Installed profiles
-are available to users already authorized to request snapshots in their
-namespace. Selecting a profile grants no additional authority over a target Pod;
-source identity checks and namespace boundaries remain mandatory. Content work
-orders carry validated profile references, not user-supplied action definitions.
+Profile management is governed by Kubernetes RBAC. Selecting a profile lets a
+snapshot requester cause the agent to invoke application behavior through HTTP,
+files, or signals. These actions are bounded, but can still affect the workload.
+
+The binding lives on PodSnapshot, separate from the Pod definition, so selecting
+a profile does not establish the workload owner's consent to those actions.
+Authorization must cover the target Pod as well as the snapshot request. The
+contract limits actions to the selected workload and the transports below;
+arbitrary commands and caller-supplied destinations are not supported.
 
 HTTP requests go directly to the selected Pod IP, without redirects or
 environment-configured proxies. Host-network Pods are rejected for HTTP
-interactions. Pod networking does not isolate containers, so administrators must
-review profiles for the whole Pod trust boundary. The deployment must restrict
+interactions. Pod networking does not isolate containers, so HTTP actions must
+be assessed against the whole Pod trust boundary. The deployment must restrict
 the unencrypted control listener to intended callers.
 
 File access is confined to the selected container's control directory using
@@ -472,7 +502,6 @@ and restore status reporting. Add Events for profile resolution failure,
 invalid lifecycle configuration, and release failure. SnapshotJob deadline
 failures retain their existing reporting.
 Routine unsuccessful probe polls remain debug logs rather than Events.
-[Diagnostic fields](#diagnostic-fields) are listed in the appendix.
 
 ### Test Plan
 
@@ -498,52 +527,6 @@ contract, compatibility coverage for previously produced artifacts, and
 documented failure and recovery procedures.
 
 ## Appendix
-
-The implementation sequence and test cases below support the contract above.
-
-### Agent recovery
-
-The control volume remains required for runtime coordination. A new attempt
-follows this sequence; recovery resumes from recorded progress.
-
-```mermaid
-flowchart TD
-    A[Persist attempt record] --> B[Clear stale release and startup markers]
-    B --> C[Restore process and GPU state]
-    C --> D[Persist RuntimeRestored and process identity]
-    D --> E[Deliver configured release, or skip if omitted]
-    E --> F[Persist ReleaseComplete]
-    F --> G[Publish restore-complete startup marker]
-```
-
-The attempt record contains the artifact identity, Pod UID, container
-incarnation, attempt ID, absolute deadline, and resolved profile definition.
-Failure to persist `RuntimeRestored` prevents release. Failure to persist
-`ReleaseComplete` leaves the release step retriable; it does not itself justify
-cleanup. If the release action writes `restore-complete`, that write also
-publishes the startup marker.
-
-Recovery from `RuntimeRestored` retries only the release step, within the original
-deadline. Once `ReleaseComplete` is recorded, marker or status write failures
-require repair, not destructive cleanup, even after the deadline expires.
-If runtime completion cannot be established, fail and clean up the attempt
-without replaying restore in the same container.
-
-Persist records atomically in an agent-only, root-owned hostPath directory,
-keyed by Pod UID and container incarnation. One owner must hold exclusive access
-through execution, recovery, and cleanup across agent instances. Revalidate
-container membership, node boot identity, PID, and process start time before
-recovery; use a process handle for signaling to avoid PID reuse. Remove records
-after the destination is gone.
-
-Legacy restores with neither a profile binding nor an attempt record retain
-the existing completion-marker recovery path. Profile-based restores require
-the agent-owned record; workload-written markers are not completion evidence.
-
-### Diagnostic fields
-
-Log profile name, source and destination container, attempt ID, transport, attempt
-count, elapsed time, and the last HTTP failure status when applicable.
 
 ### Detailed test coverage
 
