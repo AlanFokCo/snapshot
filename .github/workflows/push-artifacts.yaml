@@ -30,6 +30,17 @@ permissions: {}
 env:
   # Passed through to make, so the references we sign are the ones it pushed.
   REGISTRY: ghcr.io/ai-dynamo/snapshot
+  # Layer cache, one tag per image. Not type=gha: the Actions cache is capped
+  # at 10 GiB per repository and the Go module caches alone exceed that, so
+  # buildx entries were evicted before any later run could read them and every
+  # build in every workflow started cold. A registry has no such ceiling, and
+  # it is readable from the pull request workflows, which the Actions cache
+  # was not across refs.
+  #
+  # Only this workflow writes it, and it runs on main and release branches
+  # alone. A pull request that could write a shared cache could also poison
+  # every build that reads it afterwards.
+  CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
 
 jobs:
 
@@ -173,8 +184,8 @@ jobs:
               --provenance=mode=max \
               --sbom=true \
               --metadata-file=buildx.json \
-              --cache-from=type=gha,scope=${IMAGE} \
-              --cache-to=type=gha,scope=${IMAGE},mode=max"
+              --cache-from=type=registry,ref=${CACHE_REF_PREFIX}:${IMAGE} \
+              --cache-to=type=registry,ref=${CACHE_REF_PREFIX}:${IMAGE},mode=max,image-manifest=true,oci-mediatypes=true"
           DIGEST="$(jq -er '."containerimage.digest"' buildx.json)"
           echo "${DIGEST}" > "digest-${IMAGE}.txt"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"

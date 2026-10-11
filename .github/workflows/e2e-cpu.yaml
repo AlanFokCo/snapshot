@@ -40,9 +40,9 @@ on:
     inputs:
       cache_scope_suffix:
         description: >-
-          Appended to every buildx cache scope. Any unused value gives this run
-          an empty cache, which is the only way to measure a cold build without
-          deleting caches other runs are reading.
+          Appended to every layer-cache tag. Any unused value points the build
+          at a cache that does not exist, which is how to measure a cold build
+          without disturbing the cache other runs are reading.
         required: false
         default: ""
 
@@ -52,6 +52,10 @@ concurrency:
 
 permissions:
   contents: read
+  # Read-only, and deliberately so: the layer cache is written by
+  # push-artifacts.yaml from main, never from a pull request, so that no pull
+  # request can poison the builds that read it afterwards.
+  packages: read
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -74,6 +78,9 @@ env:
   SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
   CI_PHASE_LOG: ${{ github.workspace }}/.ci-phases.tsv
   CACHE_SCOPE_SUFFIX: ${{ inputs.cache_scope_suffix }}
+  # Written by push-artifacts.yaml on main; read-only here. See the comment on
+  # CACHE_REF_PREFIX there for why this is not the Actions cache.
+  CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
 
 jobs:
   cpu-e2e:
@@ -122,19 +129,31 @@ jobs:
         timeout-minutes: 5
         run: hack/k3d-cpu-e2e.sh registry-up
 
-      # The container driver is what makes --cache-to=type=gha work. It also
-      # puts the builder on its own network, where localhost is the builder
-      # rather than the runner, so the registry created above would be
-      # unreachable; host networking is what lets one tag mean the same thing
-      # to the builder, the runner, and the cluster.
+      # The container driver is what makes an external layer cache work at
+      # all. It also puts the builder on its own network, where localhost is
+      # the builder rather than the runner, so the registry created above
+      # would be unreachable; host networking is what lets one tag mean the
+      # same thing to the builder, the runner, and the cluster.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: network=host
 
-      # Cache scopes match push-artifacts.yaml on purpose: a pull request can
-      # read the layers the last main build wrote, and writes land in the pull
-      # request's own cache rather than overwriting them.
+      # A pull request from a fork gets a token that cannot read the package.
+      # cache-from treats that as a miss and builds cold, which is what every
+      # run did before this change, so there is nothing to fall back from.
+      - name: Log in to GHCR
+        continue-on-error: true
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Read-only against the cache push-artifacts.yaml writes from main, so
+      # this reads the layers of the last merged build and writes nothing.
+      # Two runs of the same pull request therefore do not help each other;
+      # that is the price of a cache no pull request can corrupt.
       - name: Build operator image
         timeout-minutes: 15
         run: |
@@ -144,8 +163,7 @@ jobs:
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
             DOCKER_BUILD_ARGS="--push \
-              --cache-from=type=gha,scope=operator${CACHE_SCOPE_SUFFIX} \
-              --cache-to=type=gha,scope=operator${CACHE_SCOPE_SUFFIX},mode=max"
+              --cache-from=type=registry,ref=${CACHE_REF_PREFIX}:operator${CACHE_SCOPE_SUFFIX}"
           hack/ci-phase.sh "Build operator image" "${start}" \
             "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}"
 
@@ -173,8 +191,7 @@ jobs:
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
             DOCKER_BUILD_ARGS="--push \
-              --cache-from=type=gha,scope=agent${CACHE_SCOPE_SUFFIX} \
-              --cache-to=type=gha,scope=agent${CACHE_SCOPE_SUFFIX},mode=max"
+              --cache-from=type=registry,ref=${CACHE_REF_PREFIX}:agent${CACHE_SCOPE_SUFFIX}"
           hack/ci-phase.sh "Build agent image" "${start}" \
             "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}"
 
@@ -192,7 +209,7 @@ jobs:
           # cost this job no longer pays.
           make docker-export-agent-bundle \
             BUNDLE_DEST="${RUNNER_TEMP}/agent-bundle" \
-            DOCKER_BUILD_ARGS="--cache-from=type=gha,scope=agent${CACHE_SCOPE_SUFFIX}"
+            DOCKER_BUILD_ARGS="--cache-from=type=registry,ref=${CACHE_REF_PREFIX}:agent${CACHE_SCOPE_SUFFIX}"
           hack/verify-bundle-glibc.sh "${RUNNER_TEMP}/agent-bundle"
 
       - name: Build PageBroker image
@@ -204,8 +221,7 @@ jobs:
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
             DOCKER_BUILD_ARGS="--push \
-              --cache-from=type=gha,scope=pagebroker${CACHE_SCOPE_SUFFIX} \
-              --cache-to=type=gha,scope=pagebroker${CACHE_SCOPE_SUFFIX},mode=max"
+              --cache-from=type=registry,ref=${CACHE_REF_PREFIX}:pagebroker${CACHE_SCOPE_SUFFIX}"
           hack/ci-phase.sh "Build PageBroker image" "${start}" \
             "${IMAGE_REGISTRY}/pagebroker:${IMAGE_TAG}"
 

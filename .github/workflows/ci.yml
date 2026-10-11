@@ -21,6 +21,11 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Written by push-artifacts.yaml on main; read-only here. See the comment on
+  # CACHE_REF_PREFIX there for why this is not the Actions cache.
+  CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -129,10 +134,25 @@ jobs:
   pagebroker-image:
     needs: check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Read-only, and deliberately so: this job reads the layer cache that
+      # push-artifacts.yaml writes from main. Letting a pull request write it
+      # would let one poison every build that reads it afterwards.
+      packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # A pull request from a fork gets a token that cannot read the package.
+      # cache-from treats that as a miss and builds cold, which is what this
+      # job did unconditionally before, so there is nothing to fall back from.
+      - name: Log in to GHCR
+        continue-on-error: true
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - run: |
           make docker-build-pagebroker \
-            DOCKER_BUILD_ARGS="--cache-from=type=gha,scope=pagebroker \
-              --cache-to=type=gha,scope=pagebroker,mode=max"
+            DOCKER_BUILD_ARGS="--cache-from=type=registry,ref=${CACHE_REF_PREFIX}:pagebroker"
