@@ -25,6 +25,7 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
   - [Capture and restore execution](#capture-and-restore-execution)
     - [Recovery guarantees](#recovery-guarantees)
   - [Security](#security)
+  - [Configuration](#configuration)
   - [Monitoring](#monitoring)
   - [Test Plan](#test-plan)
   - [Graduation Criteria](#graduation-criteria)
@@ -57,7 +58,7 @@ integration without repeating its endpoints, signals, and timing settings.
 
 - Configure both PodSnapshot and SnapshotJob through the same profile API.
 - Record per-container profile names for resolution at capture and restore.
-- Keep the legacy file integration available without requiring a profile.
+- Provide the existing file integration as an installed, configurable default profile.
 
 ### Non-Goals
 
@@ -79,17 +80,21 @@ required application configuration.
 
 ### Defaults and user probes
 
-An empty profile is valid. Defaults depend on whether a profile is selected:
+Snapshot installs `snapshot-files`, an ApplicationProfile using the existing
+`ready-for-snapshot` and `restore-complete` files. Containers without an explicit
+binding use the administrator-configured default profile, initially
+`snapshot-files`. Explicit bindings take precedence. A missing profile, including
+the configured default, blocks the operation rather than silently falling back.
 
-- **No profile:** capture waits for the source Pod's `Ready` condition; restore
-  publishes the legacy `restore-complete` file notification. SnapshotJob injects
-  file readiness only when the target has no user-defined readiness probe.
-- **Selected profile:** an omitted `quiesceProbe` uses Pod readiness; an omitted
-  `restoreRelease` sends no application notification.
-- **All cases:** preserve every user-defined readiness, startup, and liveness
-  probe on source and destination containers. When restore startup gating is
-  enabled, inject the `restore-complete` startup probe only if the destination
-  container has no user-defined startup probe.
+An empty profile is valid. In any selected profile, an omitted `quiesceProbe`
+uses the source Pod's `Ready` condition; an omitted `restoreRelease` sends no
+application notification.
+
+Preserve every user-defined readiness, startup, and liveness probe on source
+and destination containers. SnapshotJob no longer needs to inject file readiness:
+the installed profile checks the file directly. When restore startup gating is
+enabled, inject the `restore-complete` startup probe only if the destination
+container has no user-defined startup probe.
 
 On restored containers, custom startup probes must prevent premature startup
 success, liveness must tolerate recovery, and readiness must stay false until
@@ -118,14 +123,16 @@ probes and networking. Snapshot trusts the application's capture signal.
 #### Backward compatibility and migration
 
 Existing target-container lists and checkpoint artifacts remain valid. Users do
-not need a profile for the legacy file integration, and artifacts without
-profile metadata retain the legacy release notification. Two behaviors change:
+not need an explicit binding for the installed file integration. Artifacts
+without profile metadata retain the legacy release notification, independently
+of the configured default. The capture behavior changes as follows:
 
 - User-defined probes are preserved instead of replaced or removed. Workloads
   that relied on those overrides must adjust their probes for capture and restore.
-- Without an explicit quiesce probe, capture waits for the whole Pod's `Ready`
-  condition. Unready sidecars or readiness gates can delay captures previously
-  allowed by the selected container's readiness alone.
+- The installed file profile checks `ready-for-snapshot` directly, independently
+  of Pod readiness. Workloads that previously used only Kubernetes readiness
+  must select a profile without `quiesceProbe`; that fallback waits for the
+  whole Pod's `Ready` condition, including sidecars and readiness gates.
 
 Upgrade all participating node agents before enabling profile selection in the
 operator or creating profiled work orders. Older agents ignore the new fields;
@@ -231,7 +238,8 @@ spec:
             name: cooperative-http-v1
 ```
 
-The controller copies these bindings into `PodSnapshot.spec.applicationContract`.
+The controller copies these bindings into `PodSnapshot.spec.applicationContract`;
+unbound targets use the configured default profile.
 
 #### ApplicationProfile
 
@@ -383,7 +391,7 @@ and checkpoint metadata:
 // ApplicationContract *ApplicationContract `json:"applicationContract,omitempty"`
 ```
 
-The operator copies the requested bindings into the immutable content spec;
+The operator records explicit and defaulted bindings in the immutable content spec;
 the agent records them with the checkpoint. Metadata retains profile names,
 not definitions or profile UIDs. Restore maps each captured source container's
 binding to its destination containers. Destination Pods do not select profiles.
@@ -394,7 +402,7 @@ binding to its destination containers. Destination Pods do not select profiles.
 
 ```mermaid
 flowchart TD
-    A[Resolve selected profile or use defaults] --> B{Explicit quiesceProbe?}
+    A[Resolve explicit or default profile] --> B{Profile has quiesceProbe?}
     B -->|Yes| C[Poll until successThreshold is reached]
     B -->|No| D[Wait for whole-Pod Ready]
     C --> E[Revalidate source identity]
@@ -402,8 +410,8 @@ flowchart TD
     E --> F[Capture process and GPU state]
 ```
 
-The agent saves the resolved profile for retries and restarts. A missing named
-profile never falls back to defaults. The application must clear stale readiness
+The agent saves the resolved profile for retries and restarts. A missing
+profile blocks capture, including when selected by default. The application must clear stale readiness
 markers before initialization and remain safe once its capture signal succeeds.
 Pod readiness includes other containers and readiness gates.
 
@@ -495,6 +503,68 @@ application memory.
 should credentials be configured for capture and restore? The proposed API has
 no credential fields; initial support remains undecided.
 
+### Configuration
+
+Snapshot installs this ApplicationProfile with the release:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: ApplicationProfile
+metadata:
+  name: snapshot-files
+spec:
+  quiesceProbe:
+    file:
+      name: ready-for-snapshot
+  restoreRelease:
+    file:
+      name: restore-complete
+```
+
+The proposed Helm setting selects the default for both PodSnapshot and
+SnapshotJob across the cluster. Snapshot ships with:
+
+```yaml
+operator:
+  defaultApplicationProfile: snapshot-files
+```
+
+To change it, install an ApplicationProfile and set its name in the release's
+values file, then apply the change with `helm upgrade`:
+
+```yaml
+operator:
+  defaultApplicationProfile: my-application-profile
+```
+
+The operator resolves omitted bindings before issuing capture work and persists
+those effective bindings with the content. Changing the default affects only
+captures whose bindings have not yet been resolved. Retries retain the selected
+name, and restores use checkpoint metadata rather than the cluster default.
+
+The setting must name an ApplicationProfile; an empty value is invalid. If the
+named resource is unavailable, captures that depend on it wait for resolution.
+An explicit per-container `profileRef` takes precedence over this setting.
+
+For example, this PodSnapshot uses the configured default for `main`:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: PodSnapshot
+metadata:
+  name: model-snapshot
+spec:
+  source:
+    podRef:
+      name: model-source
+      containers: [main]
+```
+
+With the shipped configuration, capture waits for
+`$SNAPSHOT_CONTROL_DIR/ready-for-snapshot`; restore publishes
+`$SNAPSHOT_CONTROL_DIR/restore-complete`. A SnapshotJob likewise uses the default
+when its `podSnapshotTemplate.applicationContract` omits the target's binding.
+
 ### Monitoring
 
 Expose waiting for quiescence and release failures through existing snapshot
@@ -538,10 +608,13 @@ documented failure and recovery procedures.
 - **Capture and probes:** explicit quiesce probes versus Pod readiness fallback,
   success thresholds, source incarnation changes, cancellation, and deadlines.
   Preserve every user-defined probe on source and destination containers;
-  inject SnapshotJob file readiness only when no profile and no user readiness
-  probe are present. Inject restore startup gating only when enabled and no user
+  verify the default file profile checks readiness without injecting a Pod
+  readiness probe. Inject restore startup gating only when enabled and no user
   startup probe exists.
-- **Profile resolution:** missing names block new attempts and become usable
+- **Profile resolution:** verify installation of the file profile, administrator
+  default selection, explicit binding precedence, and persisted default bindings.
+  Default changes must not affect bound captures or existing artifacts; artifacts
+  without bindings retain legacy release behavior. Missing names block new attempts and become usable
   after recreation. New attempts use replacement definitions; existing attempts
   retain saved definitions across profile deletion and agent restart.
 - **Restore recovery:** inject failures around runtime completion, release,
