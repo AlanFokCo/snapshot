@@ -40,8 +40,12 @@ func testPlugin(t *testing.T, resolver *fakeResolver) (*Plugin, string) {
 	require.NoError(t, os.WriteFile(proxy, []byte("proxy binary"), 0o755))
 	p := NewPlugin(resolver, testr.New(t))
 	p.proxyPath = proxy
-	p.controlDir = func(podUID, containerName string) (string, error) {
-		return filepath.Join(root, podUID, containerName), nil
+	p.openControlDir = func(podUID, containerName string) (*os.File, error) {
+		dir := filepath.Join(root, podUID, containerName)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+		return os.Open(dir)
 	}
 	return p, root
 }
@@ -141,7 +145,11 @@ func TestInstallProxyReplacesAnEarlierCopy(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, podcontract.RestoreProxyBinaryName), []byte("old"), 0o644))
 
-	require.NoError(t, installProxy(src, dir))
+	d, err := os.Open(dir)
+	require.NoError(t, err)
+	defer d.Close()
+
+	require.NoError(t, installProxy(src, d))
 
 	data, err := os.ReadFile(filepath.Join(dir, podcontract.RestoreProxyBinaryName))
 	require.NoError(t, err)
