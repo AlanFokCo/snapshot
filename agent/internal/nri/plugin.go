@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
@@ -36,7 +37,7 @@ const (
 	PluginIndex = "50"
 
 	// ProxyBinaryPath is where the agent image ships the proxy.
-	ProxyBinaryPath = "/snapshot-binaries/" + podcontract.RestoreProxyBinaryName
+	ProxyBinaryPath = nsmount.SnapshotBinSrc + "/" + podcontract.RestoreProxyBinaryName
 
 	// lookupTimeout bounds the API read for Pods without a container map. It
 	// runs inside the runtime's CreateContainer call, which NRI also bounds.

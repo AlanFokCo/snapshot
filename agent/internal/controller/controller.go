@@ -55,18 +55,16 @@ import (
 // snapshot execution for checkpoint and restore requests. Both paths are workqueue
 // driven, with typed reads/writes via an uncached controller-runtime client.
 type NodeController struct {
-	config                 *types.AgentConfig
-	clientset              kubernetes.Interface
-	client                 client.Client
-	dynClient              dynamic.Interface
-	runtime                snapshotruntime.Runtime
-	injector               executor.RestoreMounter
-	log                    logr.Logger
-	checkpointFn           func(ctx context.Context, params CheckpointParams) error
-	restoreFn              func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
-	writeControlSentinelFn func(int, string, []byte) error
-	// writePodControlSentinelFn writes through the host path of the control
-	// volume, for when no process in the container can be resolved.
+	config                    *types.AgentConfig
+	clientset                 kubernetes.Interface
+	client                    client.Client
+	dynClient                 dynamic.Interface
+	runtime                   snapshotruntime.Runtime
+	injector                  executor.RestoreMounter
+	log                       logr.Logger
+	checkpointFn              func(ctx context.Context, params CheckpointParams) error
+	restoreFn                 func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
+	writeControlSentinelFn    func(int, string, []byte) error
 	writePodControlSentinelFn func(string, string, string, []byte) error
 	controlSentinelExistsFn   func(int, string) (bool, error)
 	sendSignalFn              func(logr.Logger, int, syscall.Signal, string) error
@@ -1043,8 +1041,9 @@ func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) e
 	placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
 	if err != nil {
 		// Nothing can be killed, so the marker is the only way the container's
-		// proxy learns that no restore is coming. Without a PID it goes
-		// through the host path of the control volume.
+		// proxy learns that no restore is coming. With no process in the
+		// container to write through, it goes through the node's path of the
+		// control volume.
 		if markErr := w.writePodControlSentinelFn(string(op.pod.UID), op.destination, podcontract.RestoreFailedFile, restoreFailedSentinelContents); markErr != nil {
 			op.log.Error(markErr, "Failed to write restore-failed sentinel through the host path")
 		}
