@@ -18,7 +18,7 @@ SPDX-License-Identifier: Apache-2.0
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
 - [Design Details](#design-details)
   - [Deciding what to repeat](#deciding-what-to-repeat)
-  - [When a suspended workload is still dumpable](#when-a-suspended-workload-is-still-dumpable)
+  - [Whether a failed dump can simply be retried](#whether-a-failed-dump-can-simply-be-retried)
   - [Reviving a suspended workload](#reviving-a-suspended-workload)
   - [Attempt lifecycle](#attempt-lifecycle)
   - [Failures that end the capture immediately](#failures-that-end-the-capture-immediately)
@@ -123,15 +123,17 @@ the cheapest recovery that fits:
 | Workload state | Recovery |
 | --- | --- |
 | Running, untouched | discard the attempt and start another |
-| Suspended, still dumpable | dump again, keeping the GPU state as it is |
-| Suspended, not dumpable | revive it, then suspend and dump again |
+| Suspended, and can be dumped as it stands | dump again, leaving the GPU state alone |
+| Suspended, but the failed attempt left it unusable | revive it, then suspend and dump again |
 | Terminated, checkpoint staged | store again; no live workload is needed |
 | Terminated, nothing staged | the capture fails |
 
 The second row is the one that matters most. Suspending a workload's GPU state
-is by far the expensive step, and a failed dump leaves that work done and still
-valid — so the common case repeats only the dump. Reviving is the fallback for
-when it is not.
+is by far the expensive step, and a failed dump usually leaves that work done
+and still valid — so the common case repeats only the dump. The third row is
+the fallback for when the failed attempt left the workload in a state the dump
+cannot start from; deciding between the two is
+[the dumpability check](#whether-a-failed-dump-can-simply-be-retried).
 
 Anything else ends the capture immediately with a reason naming the cause.
 Retries continue while the configured limit allows, and a capture that uses up
@@ -215,43 +217,47 @@ The agent's kill of the source immediately after a dump failure is removed.
 Today it fires within milliseconds, destroying the state every recovery depends
 on; what happens to the workload is now the probe's decision.
 
-### When a suspended workload is still dumpable
+### Whether a failed dump can simply be retried
 
-After the GPU suspend, the workload's GPU memory has moved to host memory and
-the process tree is otherwise untouched. A dump that fails from there can leave
-that tree in one of three conditions, and telling them apart is what decides
-between dumping again and reviving first.
+By the time a dump runs, the suspend has already moved the workload's GPU
+memory to host memory — the expensive step. So after a dump fails the agent
+needs the answer to one question: **can CRIU dump this process again as it
+stands?** If it can, the retry costs only the dump. If it cannot, the workload
+has to be put back to running and suspended afresh, paying that GPU transfer a
+second time.
 
-**Dumpable** means the tree presents exactly as it did after a clean suspend —
-nothing about the failed dump is still attached to it:
+The answer can be no because dumping is invasive. To dump a process tree CRIU
+`ptrace`-attaches to every task in it — *seizing* it — and injects a small blob
+of code, the *parasite*, which runs inside the process to read out its own
+memory. CRIU undoes both when it finishes, on success and on failure alike. But
+a run that is interrupted, or that fails in a way which skips its cleanup, can
+leave tasks still attached or still stopped, and **CRIU cannot seize a process
+that is already seized**. Such a process must be reset before it can be dumped
+again.
 
-| Signal | Required value | What it rules out |
-| --- | --- | --- |
-| Every recorded process present, thread count unchanged | as recorded at suspend | the tree changed: a process exited or forked after CRIU released it |
-| `TracerPid` | `0` | CRIU still has the process seized |
-| Task state | not `T` | the process is left stopped |
-| Task state | not `D` | the process is blocked in an uninterruptible driver call and cannot be seized reliably |
-| Every GPU process | `checkpointed` | the suspend itself did not complete |
+The agent therefore checks that nothing from the failed attempt is still
+attached, and that the tree is the one it suspended:
 
-These are the signals because of how CRIU works: it seizes a tree by
-`ptrace`-attaching and injecting a parasite, so `TracerPid` and the task state
-are the direct evidence of whether it let go, and the thread count is the
-cheapest check that the tree is the one that was suspended. GPU state is read
-from the existing `--get-state` helper action.
+- **No task is traced or stopped** — `TracerPid` is `0` and no task is in state
+  `T`. This is the direct evidence that CRIU released the process.
+- **No task is in uninterruptible sleep** (state `D`) — such a task is blocked
+  inside a driver call and cannot be seized reliably.
+- **The tree is unchanged** — every process recorded at suspend is present and
+  its thread count still matches, so nothing exited or forked after CRIU let go.
+- **The GPU state is uniform** — every GPU process reads `checkpointed`. A
+  suspend that failed partway leaves some processes merely `locked`, and that
+  tree is not the one the dump was meant to capture.
 
-When all of them hold, the agent dumps again and touches nothing else. This is
-the expected case: CRIU cures its parasite and unseizes as part of failing, so
-a dump that failed cleanly leaves precisely this signature — measured, and
-indistinguishable from a workload that was only ever suspended.
+When all four hold, the process is exactly what it was before CRIU touched it,
+and the agent dumps again without disturbing the GPU state. Measurement shows
+this is the normal outcome: after a failed dump the workload read task state
+`S`, `TracerPid` `0`, an unchanged thread count and `checkpointed` GPU state —
+indistinguishable from one that had only ever been suspended
+([Test Plan](#test-plan)).
 
-**Not dumpable, but recoverable** is any single deviation above. The GPU state
-may be mixed because the suspend failed partway; CRIU may still hold the
-process; the process may be blocked in the driver; or the tree may have moved
-on. None of these can be dumped as they stand, and all of them are fixed by
-reviving the workload and starting the suspend again.
-
-**Terminal** is a GPU process reporting `failed`, which is the driver saying
-the context is unrecoverable, or a recorded process that is gone.
+When any of them does not hold, the workload cannot be dumped as it stands, but
+it is not lost. Reviving it and suspending again produces a clean starting
+point, and this is the only path that pays the GPU transfer twice.
 
 ### Reviving a suspended workload
 
