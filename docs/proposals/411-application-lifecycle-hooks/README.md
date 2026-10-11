@@ -146,8 +146,8 @@ below.
 
 #### Application contract
 
-PodSnapshot selects profiles through `spec.applicationContract`, keyed by source
-container name:
+PodSnapshot selects profiles through `spec.applicationContract.containers`, a
+list keyed by source container name:
 
 ```go
 type PodSnapshotSpec struct {
@@ -156,10 +156,13 @@ type PodSnapshotSpec struct {
 }
 
 type ApplicationContract struct {
-	Containers map[string]ContainerApplicationContract `json:"containers"`
+	// +listType=map
+	// +listMapKey=name
+	Containers []ContainerApplicationContract `json:"containers"`
 }
 
 type ContainerApplicationContract struct {
+	Name       string                      `json:"name"`
 	ProfileRef ApplicationProfileReference `json:"profileRef"`
 }
 
@@ -168,7 +171,7 @@ type ApplicationProfileReference struct {
 }
 ```
 
-Each `containers` key must name a container selected by
+Each entry's `name` must match a container selected by
 `spec.source.podRef.containers`. Each binding requires a nonempty
 `profileRef.name` that is a valid Kubernetes resource name for a cluster-scoped
 profile. A selected container without a binding uses the default behavior
@@ -190,7 +193,7 @@ spec:
       containers: [main]
   applicationContract:
     containers:
-      main:
+      - name: main
         profileRef:
           name: cooperative-http-v1
 ```
@@ -215,7 +218,7 @@ type PodSnapshotTemplate struct {
 ```
 
 `applicationContract` is the new optional field; the other fields retain their
-existing semantics. Its container keys must belong to `targetContainers`.
+existing semantics. Each entry's `name` must belong to `targetContainers`.
 
 For example, add this fragment alongside the existing `spec.podTemplate`:
 
@@ -225,7 +228,7 @@ spec:
     targetContainers: [main]
     applicationContract:
       containers:
-        main:
+        - name: main
           profileRef:
             name: cooperative-http-v1
 ```
@@ -545,7 +548,8 @@ count, elapsed time, and the last HTTP failure status when applicable.
 ### Detailed test coverage
 
 - **API and propagation:** optional actions and empty profiles, handler
-  exclusivity, defaults, immutable specs, target-container validation, and
+  exclusivity, defaults, immutable specs, unique list keys, target-container
+  validation, and
   bindings copied from SnapshotJob through content and checkpoint metadata.
   Preserve the existing target-name lists and single-container capture limit.
 - **Capture and probes:** explicit quiesce probes versus Pod readiness fallback,
