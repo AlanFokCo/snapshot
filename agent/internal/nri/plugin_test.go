@@ -65,7 +65,7 @@ func testPlugin(t *testing.T, resolver *fakeResolver) (*Plugin, string) {
 }
 
 func restoreSandbox(annotations map[string]string) *api.PodSandbox {
-	return &api.PodSandbox{Name: "restore-worker", Namespace: "inference", Uid: "pod-uid", Annotations: annotations}
+	return &api.PodSandbox{Name: "restore-worker", Namespace: "sasoolin-vc-a", Uid: "pod-uid", Annotations: annotations}
 }
 
 func TestCreateContainerScope(t *testing.T) {
@@ -119,7 +119,7 @@ func TestCreateContainerLooksUpThePodInItsOwnCluster(t *testing.T) {
 		_, _, err := p.CreateContainer(context.Background(), restoreSandbox(restoreFrom), &api.Container{Name: "main"})
 
 		require.NoError(t, err)
-		assert.Equal(t, "inference/restore-worker/pod-uid", resolver.lookedUp)
+		assert.Equal(t, "sasoolin-vc-a/restore-worker/pod-uid", resolver.lookedUp)
 		assert.Equal(t, "restore-worker", resolver.pod.Name, "destinations come from the API Pod")
 	})
 
@@ -127,7 +127,7 @@ func TestCreateContainerLooksUpThePodInItsOwnCluster(t *testing.T) {
 		resolver := &fakeResolver{destinations: []string{"main"}}
 		p, root := testPlugin(t, resolver)
 		sandbox := &api.PodSandbox{
-			Name: "restore-worker-x-inference-x-tenant", Namespace: "tenant", Uid: "host-uid",
+			Name: "restore-worker-x-inference-x-tenant", Namespace: "sasoolin-vc-a", Uid: "host-uid",
 			Annotations: map[string]string{
 				podcontract.RestoreFromAnnotation: "snapshot-a",
 				vclusterNamespaceAnnotation:       "inference",

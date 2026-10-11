@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +52,10 @@ const (
 	vclusterNameAnnotation      = "vcluster.loft.sh/object-name"
 	vclusterUIDAnnotation       = "vcluster.loft.sh/object-uid"
 )
+
+// testHostNamespacePrefix matches the host namespaces of the test vClusters.
+// TEST ONLY.
+const testHostNamespacePrefix = "sasoolin-vc-"
 
 // proxyCommand is the proxy as the container sees it: the control directory
 // is mounted at SnapshotControlMountPath.
@@ -119,6 +124,12 @@ func (p *Plugin) Run(ctx context.Context) error {
 // retries it: running the image's own command instead would start the
 // workload from scratch in a container the agent is about to restore into.
 func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+	// TEST ONLY (manual test on a shared cluster, never merged): act only on
+	// Pods of the test vClusters. Both vClusters pass, so each plugin still
+	// sees the other cluster's Pods.
+	if !strings.HasPrefix(pod.GetNamespace(), testHostNamespacePrefix) {
+		return nil, nil, nil
+	}
 	if _, ok := pod.GetAnnotations()[podcontract.RestoreFromAnnotation]; !ok {
 		return nil, nil, nil
 	}
