@@ -128,7 +128,14 @@ func ExecuteRestore(
 		restore = time.Since(restoreStart)
 		log.Error(err, "go-criu Restore returned error")
 		logging.LogRestoreErrors(imageDirPath, settings.WorkDir, log)
+		// Read before cleanup: without a work dir the log lives in the image dir.
+		lastErr := logging.LastRestoreError(imageDirPath, settings.WorkDir)
 		cleanupAfterError()
+		if lastErr != "" {
+			// The RPC error carries CRIU's first logged error, which can be an
+			// earlier non-fatal one; the last one names what stopped restore.
+			return 0, nil, prepare, restore, fmt.Errorf("CRIU restore failed: %s", lastErr)
+		}
 		return 0, nil, prepare, restore, fmt.Errorf("CRIU restore failed: %w", err)
 	}
 	restore = time.Since(restoreStart)

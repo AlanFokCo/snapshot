@@ -547,7 +547,7 @@ func TestReconcileRestorePodReportsPartialSuccess(t *testing.T) {
 	payload := string(lastPodStatusApply(t, w).GetPatch())
 	assert.Contains(t, payload, `"status":"False"`)
 	assert.Contains(t, payload, `"reason":"RestorePartiallySucceeded"`)
-	assert.Contains(t, payload, "engine-1")
+	assert.Contains(t, payload, "not restored: engine-1: restore failed")
 	assert.True(t, isRestoreTerminal(pod))
 }
 
@@ -569,8 +569,8 @@ func TestReconcileRestorePodReportsAllDestinationsFailed(t *testing.T) {
 	payload := string(lastPodStatusApply(t, w).GetPatch())
 	assert.Contains(t, payload, `"status":"False"`)
 	assert.Contains(t, payload, `"reason":"RestoreFailed"`)
-	assert.Contains(t, payload, "engine-0")
-	assert.Contains(t, payload, "engine-1")
+	assert.Contains(t, payload, "engine-0: engine-0 restore failed")
+	assert.Contains(t, payload, "engine-1: engine-1 restore failed")
 }
 
 func TestIsRestoreTerminalRequiresKnownTerminalOutcome(t *testing.T) {
@@ -672,14 +672,16 @@ func TestRestoreTallyVerdictCoversEveryOutcome(t *testing.T) {
 		{
 			name: "some restored and the rest not",
 			tally: restoreTally{
-				total:        3,
-				succeeded:    []string{"engine-0"},
-				failed:       []string{"engine-1"},
-				incompatible: []string{"engine-2"},
+				total:          3,
+				succeeded:      []string{"engine-0"},
+				failed:         []string{"engine-1"},
+				failureReasons: []string{"engine-1: restore pod is missing mounts /cache/vllm, /models"},
+				incompatible:   []string{"engine-2"},
 			},
-			wantStatus:  corev1.ConditionFalse,
-			wantReason:  podcontract.RestoreReasonPartiallySucceeded,
-			wantMessage: "Restored 1 of 3 destination containers from PodSnapshot snapshot-a; not restored: engine-1, engine-2",
+			wantStatus: corev1.ConditionFalse,
+			wantReason: podcontract.RestoreReasonPartiallySucceeded,
+			wantMessage: "Restored 1 of 3 destination containers from PodSnapshot snapshot-a; " +
+				"not restored: engine-1: restore pod is missing mounts /cache/vllm, /models; engine-2",
 		},
 		{
 			name: "every destination refused",
@@ -699,20 +701,27 @@ func TestRestoreTallyVerdictCoversEveryOutcome(t *testing.T) {
 		{
 			name: "some failed and some refused",
 			tally: restoreTally{
-				total:        2,
-				failed:       []string{"engine-0"},
-				incompatible: []string{"engine-1"},
+				total:          2,
+				failed:         []string{"engine-0"},
+				failureReasons: []string{"engine-0: restore pod is missing mount /cache/vllm"},
+				incompatible:   []string{"engine-1"},
 			},
-			wantStatus:  corev1.ConditionFalse,
-			wantReason:  podcontract.RestoreReasonFailed,
-			wantMessage: "Restore failed for 1 destination container(s) and refused 1 incompatible destination(s) from PodSnapshot snapshot-a",
+			wantStatus: corev1.ConditionFalse,
+			wantReason: podcontract.RestoreReasonFailed,
+			wantMessage: "Restore failed for 1 destination container(s) and refused 1 incompatible destination(s) " +
+				"from PodSnapshot snapshot-a: engine-0: restore pod is missing mount /cache/vllm",
 		},
 		{
-			name:        "every destination failed",
-			tally:       restoreTally{total: 2, failed: []string{"engine-0", "engine-1"}},
-			wantStatus:  corev1.ConditionFalse,
-			wantReason:  podcontract.RestoreReasonFailed,
-			wantMessage: "Restore failed for all 2 destination container(s) from PodSnapshot snapshot-a: engine-0, engine-1",
+			name: "every destination failed",
+			tally: restoreTally{
+				total:          2,
+				failed:         []string{"engine-0", "engine-1"},
+				failureReasons: []string{"engine-0: restore pod is missing mount /cache/vllm", "engine-1: CRIU restore failed: boom"},
+			},
+			wantStatus: corev1.ConditionFalse,
+			wantReason: podcontract.RestoreReasonFailed,
+			wantMessage: "Restore failed for all 2 destination container(s) from PodSnapshot snapshot-a: " +
+				"engine-0: restore pod is missing mount /cache/vllm; engine-1: CRIU restore failed: boom",
 		},
 	}
 

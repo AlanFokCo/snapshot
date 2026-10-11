@@ -43,6 +43,8 @@ type RestoreInNamespaceResult struct {
 	CRIUPrepareDuration    time.Duration `json:"criuPrepareDuration"`
 	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
 	CUDARestoreDuration    time.Duration `json:"cudaRestoreDuration"`
+	// Error is set, with every other field empty, when nsrestore exits non-zero.
+	Error string `json:"error,omitempty"`
 }
 
 // CleanupError is the wire representation of a successful restore whose

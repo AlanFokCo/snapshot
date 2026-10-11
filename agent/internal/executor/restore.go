@@ -621,7 +621,7 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("nsrestore failed: %w\nstdout: %s", err, stdout.String())
+		return nil, nsrestoreFailure(stdout.Bytes(), err)
 	}
 
 	var result RestoreInNamespaceResult
@@ -633,6 +633,16 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	return &result, nil
+}
+
+// nsrestoreFailure prefers the cause nsrestore reports on stdout over the bare
+// exit status, so restore status and events name what actually failed.
+func nsrestoreFailure(stdout []byte, runErr error) error {
+	var result RestoreInNamespaceResult
+	if err := json.Unmarshal(stdout, &result); err == nil && result.Error != "" {
+		return errors.New(result.Error)
+	}
+	return fmt.Errorf("%w\nstdout: %s", runErr, stdout)
 }
 
 const firstExtraFileDescriptor = 3
