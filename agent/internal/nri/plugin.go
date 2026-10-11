@@ -22,7 +22,6 @@ import (
 	"github.com/containerd/nri/pkg/stub"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
@@ -39,17 +38,29 @@ const (
 	// ProxyBinaryPath is where the agent image ships the proxy.
 	ProxyBinaryPath = nsmount.SnapshotBinSrc + "/" + podcontract.RestoreProxyBinaryName
 
-	// lookupTimeout bounds the API read for Pods without a container map. It
-	// runs inside the runtime's CreateContainer call, which NRI also bounds.
+	// lookupTimeout bounds the API reads for one container. They run inside
+	// the runtime's CreateContainer call, which NRI also bounds.
 	lookupTimeout = time.Second
+)
+
+// vCluster syncs a Pod to the host under another name, namespace and UID, and
+// NRI reports the host Pod. vCluster records the Pod's own identity in these
+// annotations on the host Pod.
+const (
+	vclusterNamespaceAnnotation = "vcluster.loft.sh/object-namespace"
+	vclusterNameAnnotation      = "vcluster.loft.sh/object-name"
+	vclusterUIDAnnotation       = "vcluster.loft.sh/object-uid"
 )
 
 // proxyCommand is the proxy as the container sees it: the control directory
 // is mounted at SnapshotControlMountPath.
 var proxyCommand = []string{path.Join(podcontract.SnapshotControlMountPath, podcontract.RestoreProxyBinaryName)}
 
-// DestinationResolver returns the containers a restore Pod restores into.
+// DestinationResolver finds restore Pods in the agent's own cluster, and the
+// containers they restore into.
 type DestinationResolver interface {
+	// RestorePod returns nil if the agent's cluster has no such Pod.
+	RestorePod(ctx context.Context, namespace, name string, uid ktypes.UID) (*corev1.Pod, error)
 	RestoreDestinations(ctx context.Context, pod *corev1.Pod) ([]string, error)
 }
 
@@ -111,16 +122,23 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	if _, ok := pod.GetAnnotations()[podcontract.RestoreFromAnnotation]; !ok {
 		return nil, nil, nil
 	}
-	log := p.log.WithValues("pod", pod.GetNamespace()+"/"+pod.GetName(), "container", ctr.GetName())
+	namespace, name, uid := podIdentity(pod)
+	log := p.log.WithValues("pod", namespace+"/"+name, "container", ctr.GetName())
 
 	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
-	destinations, err := p.resolver.RestoreDestinations(lookupCtx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name:        pod.GetName(),
-		Namespace:   pod.GetNamespace(),
-		UID:         ktypes.UID(pod.GetUid()),
-		Annotations: pod.GetAnnotations(),
-	}})
+	// The runtime may also run Pods of other clusters that share the node.
+	// Those are left alone: their own Snapshot install, if any, handles them.
+	restorePod, err := p.resolver.RestorePod(lookupCtx, namespace, name, ktypes.UID(uid))
+	if err != nil {
+		log.Error(err, "Cannot look up restore Pod")
+		return nil, nil, fmt.Errorf("snapshot: look up restore Pod: %w", err)
+	}
+	if restorePod == nil {
+		log.V(1).Info("Restore Pod is not in this cluster; leaving it alone")
+		return nil, nil, nil
+	}
+	destinations, err := p.resolver.RestoreDestinations(lookupCtx, restorePod)
 	if err != nil {
 		log.Error(err, "Cannot resolve restore destinations")
 		return nil, nil, fmt.Errorf("snapshot: resolve restore destinations: %w", err)
@@ -129,6 +147,7 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 		return nil, nil, nil
 	}
 
+	// kubelet's directories use the UID of the Pod on the node.
 	dir, err := p.openControlDir(pod.GetUid(), ctr.GetName())
 	if err == nil {
 		err = installProxy(p.proxyPath, dir)
@@ -143,6 +162,16 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	adjust.SetArgs(proxyCommand)
 	log.Info("Restore proxy is PID 1", "control_dir", dir.Name())
 	return adjust, nil, nil
+}
+
+// podIdentity returns the Pod's namespace, name and UID in its own cluster.
+func podIdentity(pod *api.PodSandbox) (namespace, name, uid string) {
+	a := pod.GetAnnotations()
+	namespace, name, uid = a[vclusterNamespaceAnnotation], a[vclusterNameAnnotation], a[vclusterUIDAnnotation]
+	if namespace == "" || name == "" || uid == "" {
+		return pod.GetNamespace(), pod.GetName(), pod.GetUid()
+	}
+	return namespace, name, uid
 }
 
 // installProxy copies the proxy binary into dir. It copies on every creation:

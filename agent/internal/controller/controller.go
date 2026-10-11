@@ -613,6 +613,24 @@ func validatePodSnapshotContentForRestore(content *snapshotv1alpha1.PodSnapshotC
 	return nil
 }
 
+// RestorePod returns the Pod namespace/name from this agent's API server, or
+// nil if there is no such Pod with that UID. On a node shared with other
+// clusters, such as vCluster tenants, the runtime runs their Pods too, and
+// those are not this agent's to restore.
+func (w *NodeController) RestorePod(ctx context.Context, namespace, name string, uid ktypes.UID) (*corev1.Pod, error) {
+	pod := &corev1.Pod{}
+	if err := w.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if pod.UID != uid {
+		return nil, nil
+	}
+	return pod, nil
+}
+
 // RestoreDestinations returns the names of the containers a restore Pod
 // restores into. When the Pod carries no container map, the destination is the
 // captured container, which only the bound PodSnapshotContent records, so that
