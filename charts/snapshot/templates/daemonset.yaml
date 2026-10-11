@@ -192,14 +192,10 @@ spec:
             # so overrides stay reachable inside the container.
             - name: runtime-run
               mountPath: {{ $socketDir | quote }}
-            # Kubelet pods directory: volume discovery, and the per-Pod
-            # snapshot-control emptyDir. The agent writes there: the restore
-            # proxy binary, and restore-failed when the container cannot be
-            # resolved. HostToContainer lets it see emptyDirs that kubelet
-            # mounts later, such as medium: Memory.
+            # Mount kubelet pods directory for volume discovery
             - name: kubelet-pods
               mountPath: /var/lib/kubelet/pods
-              mountPropagation: HostToContainer
+              readOnly: true
             # NRI socket directory, for the plugin that makes the restore
             # proxy PID 1 in restore containers.
             - name: nri
@@ -265,7 +261,7 @@ spec:
           hostPath:
             path: {{ $socketDir | quote }}
             type: Directory
-        # Kubelet pods directory (volume discovery, snapshot-control emptyDirs)
+        # Kubelet pods directory (for volume discovery)
         - name: kubelet-pods
           hostPath:
             path: /var/lib/kubelet/pods

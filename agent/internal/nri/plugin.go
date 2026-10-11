@@ -14,7 +14,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -57,18 +56,18 @@ type DestinationResolver interface {
 type Plugin struct {
 	resolver DestinationResolver
 	log      logr.Logger
-	// controlDir and proxyPath are replaced in tests.
-	controlDir func(podUID, containerName string) (string, error)
-	proxyPath  string
+	// openControlDir and proxyPath are replaced in tests.
+	openControlDir func(podUID, containerName string) (*os.File, error)
+	proxyPath      string
 }
 
 // NewPlugin returns a plugin that resolves destinations through resolver.
 func NewPlugin(resolver DestinationResolver, log logr.Logger) *Plugin {
 	return &Plugin{
-		resolver:   resolver,
-		log:        log,
-		controlDir: snapshotruntime.PodControlDir,
-		proxyPath:  ProxyBinaryPath,
+		resolver:       resolver,
+		log:            log,
+		openControlDir: snapshotruntime.OpenPodControlDir,
+		proxyPath:      ProxyBinaryPath,
 	}
 }
 
@@ -129,9 +128,10 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 		return nil, nil, nil
 	}
 
-	dir, err := p.controlDir(pod.GetUid(), ctr.GetName())
+	dir, err := p.openControlDir(pod.GetUid(), ctr.GetName())
 	if err == nil {
 		err = installProxy(p.proxyPath, dir)
+		_ = dir.Close()
 	}
 	if err != nil {
 		log.Error(err, "Cannot install restore proxy")
@@ -140,43 +140,20 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 
 	adjust := &api.ContainerAdjustment{}
 	adjust.SetArgs(proxyCommand)
-	log.Info("Restore proxy is PID 1", "control_dir", dir)
+	log.Info("Restore proxy is PID 1", "control_dir", dir.Name())
 	return adjust, nil, nil
 }
 
-// installProxy copies the proxy binary into dir. It writes a temporary file
-// and renames it, so the container never sees a partial binary. It copies on
-// every creation: the emptyDir is per Pod, and the binary is a few MB.
-func installProxy(src, dir string) (retErr error) {
-	// kubelet normally creates the subPath directory before CreateContainer.
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
+// installProxy copies the proxy binary into dir. It copies on every creation:
+// the emptyDir is per Pod, and the binary is a few MB.
+func installProxy(src string, dir *os.File) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-
-	tmp, err := os.CreateTemp(dir, "."+podcontract.RestoreProxyBinaryName+".*")
-	if err != nil {
+	return snapshotruntime.WriteFileInDir(dir, podcontract.RestoreProxyBinaryName, 0o755, func(w io.Writer) error {
+		_, err := io.Copy(w, in)
 		return err
-	}
-	defer func() {
-		if retErr != nil {
-			_ = os.Remove(tmp.Name())
-		}
-	}()
-	if _, err := io.Copy(tmp, in); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0o755); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), filepath.Join(dir, podcontract.RestoreProxyBinaryName))
+	})
 }
