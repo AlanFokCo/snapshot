@@ -88,6 +88,47 @@ def test_deselected_required_case_fails_the_run(pytester, monkeypatch):
     run.stderr.fnmatch_lines(["*did not select: test_required_case*"])
 
 
+def test_deselected_required_case_fails_a_parallel_run(pytester, monkeypatch):
+    """CI runs the suite under pytest-xdist, where collection happens in workers."""
+    run = run_inner(pytester, monkeypatch, "-m", "gpu", "-n", "2", required="test_required_case")
+    assert run.ret == pytest.ExitCode.USAGE_ERROR
+    run.stderr.fnmatch_lines(["*did not select: test_required_case*"])
+
+
+def test_dropping_one_parameter_case_fails_a_parallel_run(pytester, monkeypatch):
+    """The surviving cases must not run either: the refusal is the whole session's."""
+    run = run_inner(
+        pytester,
+        monkeypatch,
+        "-m",
+        "cpu",
+        "-k",
+        "parametrized and one",
+        "-n",
+        "2",
+        required="test_required_parametrized",
+    )
+    assert run.ret == pytest.ExitCode.USAGE_ERROR
+    run.assert_outcomes(passed=0)
+    run.stderr.fnmatch_lines(["*deselected: *test_required_parametrized?two?*"])
+
+
+def test_skipped_required_case_fails_a_parallel_run(pytester, monkeypatch):
+    run = run_inner(
+        pytester,
+        monkeypatch,
+        "-m",
+        "cpu",
+        "-k",
+        "skips",
+        "-n",
+        "2",
+        required="test_required_case_that_skips",
+    )
+    run.assert_outcomes(failed=1)
+    run.stdout.fnmatch_lines(["*required to run, but it was skipped*"])
+
+
 def test_skipped_required_case_fails_the_run(pytester, monkeypatch):
     run = run_inner(
         pytester,

@@ -43,9 +43,19 @@ passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
 `e2e-cpu.yaml` runs on pull requests that touch the images, chart, CRDs, or
 harness, where no GPU cluster is available. It builds the operator and agent
-images from the pull request, creates a k3d cluster, imports the images into it,
-installs the chart through the same `setup.py` phases the GPU workflow uses, and
-runs `pytest -m cpu`.
+images from the pull request, creates a k3d cluster, pushes the images into its
+registry, installs the chart through the same `setup.py` phases the GPU workflow
+uses, and runs the `cpu` tests in two passes: `pytest -m "cpu and not serial"
+-n 3`, three tests in flight through `pytest-xdist`, then `pytest -m "cpu and
+serial"` one test at a time.
+
+Most of a test's time is spent waiting on a pod or a checkpoint, so the
+parallel pass is where the job's wall clock goes down. Each test names its
+pods, snapshots, and tokens with a per-test suffix and scopes every event and
+artifact check to those names, which is what lets tests share a node. Mark a
+test `serial` when it does not fit that: anything asserting on node-wide
+state, such as the orphan sweep, which exercises a sweeper that walks the
+whole artifact root.
 
 k3d has no GPU, so `hack/k3d-cpu-e2e.sh cluster-up` fakes the three things the
 chart and test helpers inherited from the GPU environment, each safe only
@@ -71,6 +81,7 @@ cluster, install, tests — and deletes the cluster afterwards:
 make cpu-e2e                                     # the whole thing
 SNAPSHOT_E2E_KEEP_CLUSTER=true make cpu-e2e      # leave the cluster up to debug
 SNAPSHOT_E2E_SKIP_BUILD=true bash hack/cpu-e2e.sh -m cpu -k restores
+SNAPSHOT_E2E_SKIP_BUILD=true bash hack/cpu-e2e.sh -m "cpu and not serial" -n 3
 ```
 
 The agent is linux/amd64 only, so this does not work on an Apple Silicon Mac.
@@ -85,7 +96,9 @@ fails the run; a parametrized function can be named bare, which requires every
 one of its cases, or by case ID to require just that one. Without it, dropping
 a `cpu` marker would leave the check green while it tested no round trip at
 all, because pytest exits 0 for a suite that ran nothing it was asked for. It
-is unset for local runs, where skipping is legitimate.
+is unset for local runs, where skipping is legitimate. CI sets it on the
+parallel pass only, so a required test that is later marked `serial` fails
+that pass as deselected rather than quietly moving.
 
 ### Local Direct Mode
 

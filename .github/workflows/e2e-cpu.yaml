@@ -313,7 +313,20 @@ jobs:
           # Recorded even when the suite fails, so a slow run is still
           # measurable; the trap keeps the pipeline's exit status.
           trap 'hack/ci-phase.sh "Run CPU tests" "${start}"' EXIT
-          uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s
+          uv run --locked --project e2e pytest e2e/tests \
+            -m "cpu and not serial" -n 3 -vv -s
+
+      - name: Run serial CPU checkpoint/restore tests
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          trap 'hack/ci-phase.sh "Run serial CPU tests" "${start}"' EXIT
+          # Exit 5 is "no tests collected": nothing marked serial is not a failure.
+          status=0
+          uv run --locked --project e2e pytest e2e/tests \
+            -m "cpu and serial" -vv -s || status=$?
+          [ "${status}" -eq 0 ] || [ "${status}" -eq 5 ]
 
       # Last, and unconditional: the phases worth comparing are exactly the
       # ones a failing run also pays for.

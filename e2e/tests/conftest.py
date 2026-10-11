@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
@@ -21,6 +22,10 @@ REQUIRED_TESTS_ENV = "SNAPSHOT_E2E_REQUIRED_TESTS"
 # survive, is what makes a dropped parameter case visible: the bare function
 # name still matches the cases that remain.
 COLLECTED_MATCHES = pytest.StashKey[dict[str, set[str]]]()
+
+# Under pytest-xdist the workers collect, and hand problems to the controller.
+REQUIRED_PROBLEMS_KEY = "snapshot_e2e_required_test_problems"
+REPORTED_PROBLEMS = pytest.StashKey[set[str]]()
 
 
 def required_test_names() -> set[str]:
@@ -57,6 +62,33 @@ def pytest_collection_modifyitems(
     }
 
 
+def required_test_problems(
+    collected: dict[str, set[str]],
+    selected: list[pytest.Item],
+) -> list[str]:
+    problems = []
+    for name, found in sorted(collected.items()):
+        if not found:
+            problems.append(f"{name} (no such test was collected)")
+            continue
+        dropped = found - matches(selected, name)
+        if dropped:
+            problems.append(f"{name} (deselected: {', '.join(sorted(dropped))})")
+    return problems
+
+
+def required_test_message(problems: list[str]) -> str:
+    return f"{REQUIRED_TESTS_ENV} requires tests that this run did not select: " + "; ".join(
+        problems
+    )
+
+
+def is_xdist_worker(config: pytest.Config) -> bool:
+    return hasattr(config, "workerinput")
+
+
+# tryfirst: before xdist reports the items to the controller.
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_finish(session: pytest.Session) -> None:
     """Refuse to run at all when a required case will not run.
 
@@ -66,19 +98,27 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     collected = session.stash.get(COLLECTED_MATCHES, None)
     if not collected:
         return
-    problems = []
-    for name, found in sorted(collected.items()):
-        if not found:
-            problems.append(f"{name} (no such test was collected)")
-            continue
-        dropped = found - matches(session.items, name)
-        if dropped:
-            problems.append(f"{name} (deselected: {', '.join(sorted(dropped))})")
+    problems = required_test_problems(collected, session.items)
+    if not problems:
+        return
+    if is_xdist_worker(session.config):
+        session.config.workeroutput[REQUIRED_PROBLEMS_KEY] = problems
+        session.items.clear()
+        return
+    raise pytest.UsageError(required_test_message(problems))
+
+
+def pytest_testnodedown(node, error) -> None:
+    problems = (getattr(node, "workeroutput", None) or {}).get(REQUIRED_PROBLEMS_KEY)
     if problems:
-        raise pytest.UsageError(
-            f"{REQUIRED_TESTS_ENV} requires tests that this run did not select: "
-            + "; ".join(problems)
-        )
+        node.config.stash.setdefault(REPORTED_PROBLEMS, set()).update(problems)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    problems = session.config.stash.get(REPORTED_PROBLEMS, None)
+    if problems:
+        print(f"ERROR: {required_test_message(sorted(problems))}", file=sys.stderr)
+        session.exitstatus = pytest.ExitCode.USAGE_ERROR
 
 
 @pytest.hookimpl(hookwrapper=True)
