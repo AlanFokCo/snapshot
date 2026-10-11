@@ -28,7 +28,7 @@ ARG GO_IMAGE_DIGEST=sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd
 # Keep in step with GOLANGCI_LINT_VERSION in hack/tools.mk. Used by the linter
 # stage, which is a developer target (`--target linter`) and so is not covered
 # by the CI `check` job.
-ARG GOLANGCI_LINT_VERSION=v2.13.2
+ARG GOLANGCI_LINT_VERSION=v2.14.0
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
