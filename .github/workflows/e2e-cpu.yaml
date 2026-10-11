@@ -33,8 +33,18 @@ on:
       - "hack/compliance/**"
       - "hack/k3d-cpu-e2e.sh"
       - "hack/verify-bundle-glibc.sh"
+      - "hack/ci-phase.sh"
+      - "hack/ci-phase-summary.sh"
       - ".github/workflows/e2e-cpu.yaml"
   workflow_dispatch:
+    inputs:
+      cache_scope_suffix:
+        description: >-
+          Appended to every buildx cache scope. Any unused value gives this run
+          an empty cache, which is the only way to measure a cold build without
+          deleting caches other runs are reading.
+        required: false
+        default: ""
 
 concurrency:
   group: snapshot-e2e-cpu-${{ github.ref }}
@@ -48,7 +58,10 @@ env:
   UV_LINK_MODE: copy
   K3D_VERSION: v5.8.3
   KUBECTL_VERSION: v1.32.13
-  IMAGE_REGISTRY: snapshot.local
+  # The k3d-managed registry hack/k3d-cpu-e2e.sh creates. localhost is the one
+  # name Docker and BuildKit treat as plain-HTTP without further configuration;
+  # the cluster is given a mirror that maps it to the registry's container.
+  IMAGE_REGISTRY: localhost:5000
   IMAGE_TAG: cpu-e2e
   SNAPSHOT_E2E_MODE: direct
   SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
@@ -59,6 +72,8 @@ env:
   SNAPSHOT_E2E_K3D_CLUSTER: snapshot-cpu-e2e
   SNAPSHOT_E2E_HELM_TIMEOUT: 6m
   SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
+  CI_PHASE_LOG: ${{ github.workspace }}/.ci-phases.tsv
+  CACHE_SCOPE_SUFFIX: ${{ inputs.cache_scope_suffix }}
 
 jobs:
   cpu-e2e:
@@ -71,7 +86,9 @@ jobs:
       KUBECONFIG: ${{ github.workspace }}/.kubeconfig-cpu-e2e
       SNAPSHOT_E2E_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-cpu-e2e
       SNAPSHOT_E2E_SNAPSHOT_TAG: cpu-e2e
-      SNAPSHOT_E2E_WORKLOAD_IMAGE: snapshot.local/agent:cpu-e2e
+      # Not ${IMAGE_REGISTRY}: a job-level env cannot read another job-level
+      # env. Keep in step with IMAGE_REGISTRY and IMAGE_TAG above.
+      SNAPSHOT_E2E_WORKLOAD_IMAGE: localhost:5000/agent:cpu-e2e
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -87,10 +104,33 @@ jobs:
             /opt/hostedtoolcache/CodeQL || true
           df -h /
 
-      # The container driver is what makes --cache-to=type=gha work; --load then
-      # moves the result into the docker daemon so k3d can import it.
+      # k3d is needed before the builds, not just before the cluster: the
+      # registry they push to is one it creates.
+      - name: Install k3d
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/k3d \
+            "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+          k3d version
+
+      # Images reach the cluster by being pushed here and pulled from the node,
+      # rather than loaded into the runner's Docker daemon and then copied in.
+      # The old route moved every image twice, which for a CUDA-based agent
+      # image cost more than compiling it.
+      - name: Create the image registry
+        timeout-minutes: 5
+        run: hack/k3d-cpu-e2e.sh registry-up
+
+      # The container driver is what makes --cache-to=type=gha work. It also
+      # puts the builder on its own network, where localhost is the builder
+      # rather than the runner, so the registry created above would be
+      # unreachable; host networking is what lets one tag mean the same thing
+      # to the builder, the runner, and the cluster.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
 
       # Cache scopes match push-artifacts.yaml on purpose: a pull request can
       # read the layers the last main build wrote, and writes land in the pull
@@ -99,47 +139,80 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
+          start=$(date +%s)
           make docker-build-operator \
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
-            DOCKER_BUILD_ARGS="--load \
-              --cache-from=type=gha,scope=operator \
-              --cache-to=type=gha,scope=operator,mode=max"
+            DOCKER_BUILD_ARGS="--push \
+              --cache-from=type=gha,scope=operator${CACHE_SCOPE_SUFFIX} \
+              --cache-to=type=gha,scope=operator${CACHE_SCOPE_SUFFIX},mode=max"
+          hack/ci-phase.sh "Build operator image" "${start}" \
+            "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}"
+
+      # Pulled here rather than left to the build, which is the only reason
+      # this step exists. verify-base-packages runs dpkg-query in this image
+      # through `docker run`, so the agent build has always paid for a full
+      # pull of a CUDA base into the daemon before buildx starts — a cost the
+      # layer cache cannot avoid and that the build's own duration hides.
+      # Issue 505 cannot be answered without knowing how large that cost is.
+      - name: Pull the agent base image
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          base="$(make -s print-agent-base-image)"
+          start=$(date +%s)
+          docker pull --platform linux/amd64 --quiet "${base}"
+          hack/ci-phase.sh "Pull agent base image" "${start}" "${base}"
 
       - name: Build agent image
         timeout-minutes: 50
         run: |
           set -euo pipefail
+          start=$(date +%s)
           make docker-build-agent \
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
-            DOCKER_BUILD_ARGS="--load \
-              --cache-from=type=gha,scope=agent \
-              --cache-to=type=gha,scope=agent,mode=max"
+            DOCKER_BUILD_ARGS="--push \
+              --cache-from=type=gha,scope=agent${CACHE_SCOPE_SUFFIX} \
+              --cache-to=type=gha,scope=agent${CACHE_SCOPE_SUFFIX},mode=max"
+          hack/ci-phase.sh "Build agent image" "${start}" \
+            "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}"
 
       # The restore path extracts the rootfs diff with the bundled tar, run
       # under the bundled loader so the placeholder's glibc never has to
       # satisfy it. This cluster's placeholder is the agent image itself, so
       # the suite below would not notice that breaking; check it against an
-      # older userspace while the image is already built and loaded.
+      # older userspace, here, where the agent build's cache is still warm.
       - name: Verify the bundled tar on an older placeholder
         timeout-minutes: 5
-        run: hack/verify-bundle-glibc.sh "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}"
+        run: |
+          set -euo pipefail
+          # The bundle alone, from its own stage. Reading it out of the agent
+          # image would mean pulling that image into the daemon, which is the
+          # cost this job no longer pays.
+          make docker-export-agent-bundle \
+            BUNDLE_DEST="${RUNNER_TEMP}/agent-bundle" \
+            DOCKER_BUILD_ARGS="--cache-from=type=gha,scope=agent${CACHE_SCOPE_SUFFIX}"
+          hack/verify-bundle-glibc.sh "${RUNNER_TEMP}/agent-bundle"
 
       - name: Build PageBroker image
         timeout-minutes: 30
         run: |
           set -euo pipefail
+          start=$(date +%s)
           make docker-build-pagebroker \
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
-            DOCKER_BUILD_ARGS="--load \
-              --cache-from=type=gha,scope=pagebroker \
-              --cache-to=type=gha,scope=pagebroker,mode=max"
+            DOCKER_BUILD_ARGS="--push \
+              --cache-from=type=gha,scope=pagebroker${CACHE_SCOPE_SUFFIX} \
+              --cache-to=type=gha,scope=pagebroker${CACHE_SCOPE_SUFFIX},mode=max"
+          hack/ci-phase.sh "Build PageBroker image" "${start}" \
+            "${IMAGE_REGISTRY}/pagebroker:${IMAGE_TAG}"
 
       # A pass has to be attributable to the images this job built, not to
-      # whatever a registry happened to serve. Nothing is pushed here, so the
-      # local image ID is the only digest they have. Last of the build steps,
+      # whatever a registry happened to serve. The registry read below is this
+      # job's own throwaway one, which nothing else writes to, so the digests
+      # it returns are the ones these steps produced. Last of the build steps,
       # so every image it names has been built.
       - name: Record image provenance
         env:
@@ -162,11 +235,16 @@ jobs:
               echo "Built from commit \`${built}\`, the merge of \`${HEAD_SHA}\` into \`${BASE_REF}\`."
             fi
             echo
-            echo "| Image | Local image ID |"
+            echo "| Image | Digest |"
             echo "| --- | --- |"
             for component in operator agent pagebroker; do
               image="${IMAGE_REGISTRY}/${component}:${IMAGE_TAG}"
-              echo "| \`${image}\` | \`$(docker image inspect --format '{{.Id}}' "${image}")\` |"
+              # The digest the cluster will pull by, read back out of the
+              # registry. Stronger than the local image ID this used to print:
+              # that named a blob in one daemon, this names what was served.
+              digest="$(docker buildx imagetools inspect "${image}" \
+                --format '{{.Manifest.Digest}}' 2>/dev/null || echo 'unavailable')"
+              echo "| \`${image}\` | \`${digest}\` |"
             done
           } >>"${GITHUB_STEP_SUMMARY}"
 
@@ -181,14 +259,6 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
-      - name: Install k3d
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/k3d \
-            "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
-          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
-          k3d version
-
       - name: Install Python tooling
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
@@ -200,16 +270,6 @@ jobs:
       - name: Create k3d cluster
         timeout-minutes: 10
         run: hack/k3d-cpu-e2e.sh cluster-up
-
-      - name: Import images into k3d
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          k3d image import \
-            "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}" \
-            "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}" \
-            "${IMAGE_REGISTRY}/pagebroker:${IMAGE_TAG}" \
-            --cluster "${SNAPSHOT_E2E_K3D_CLUSTER}"
 
       - name: Install Snapshot
         timeout-minutes: 10
@@ -255,7 +315,25 @@ jobs:
           SNAPSHOT_E2E_REQUIRED_TESTS: >-
             test_one_cpu_snapshot_restores_into_two_containers,
             test_snapshotjob_cpu_captures_and_restore_recovers_state
-        run: uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          # Recorded even when the suite fails, so a slow run is still
+          # measurable; the trap keeps the pipeline's exit status.
+          trap 'hack/ci-phase.sh "Run CPU tests" "${start}"' EXIT
+          uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s
+
+      # Last, and unconditional: the phases worth comparing are exactly the
+      # ones a failing run also pays for.
+      - name: Summarise job phases
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          state="warm"
+          if [ -n "${CACHE_SCOPE_SUFFIX}" ]; then
+            state="cold (scope suffix \`${CACHE_SCOPE_SUFFIX}\`)"
+          fi
+          hack/ci-phase-summary.sh "${state}" >>"${GITHUB_STEP_SUMMARY}"
 
       - name: Collect diagnostics
         if: ${{ failure() }}

@@ -20,6 +20,22 @@
 set -euo pipefail
 
 CLUSTER_NAME="${SNAPSHOT_E2E_K3D_CLUSTER:-snapshot-k3d-cpu}"
+
+# A registry the cluster pulls from, so images reach the node once instead of
+# twice. The alternative -- `docker buildx --load` followed by `k3d image
+# import` -- unpacks every image into the Docker daemon and then re-packs and
+# copies it into the node, which for a multi-gigabyte CUDA-based agent image
+# costs more than building it.
+#
+# Addressed as localhost:PORT from the host and mirrored to the registry's
+# container name inside the cluster (see registry_mirror_config). localhost is
+# the one name both Docker and BuildKit treat as plain-HTTP without extra
+# configuration, which is why the same reference is not used on both sides.
+REGISTRY_NAME="${SNAPSHOT_E2E_K3D_REGISTRY:-snapshot-registry}"
+REGISTRY_PORT="${SNAPSHOT_E2E_K3D_REGISTRY_PORT:-5000}"
+# k3d prefixes the container it creates, and that name is what resolves on the
+# cluster's Docker network.
+REGISTRY_HOST="k3d-${REGISTRY_NAME}"
 # Must match what the installer requests, or the claim will not bind to the
 # volume created here. Both sides read the same variables.
 PVC_SIZE="${SNAPSHOT_E2E_PVC_SIZE:-2Gi}"
@@ -45,10 +61,14 @@ usage() {
 usage: hack/k3d-cpu-e2e.sh <command>
 
 commands:
-  cluster-up     create the cluster and write a kubeconfig
-  cluster-down   delete the cluster
-  helm-set       print the chart values this cluster needs, one KEY=VALUE per
-                 line, for the installer's SNAPSHOT_E2E_HELM_SET
+  registry-up      create the image registry the cluster pulls from. Run this
+                   before building images, and before cluster-up, which wires
+                   the cluster to whatever registry exists
+  registry-prefix  print the registry prefix to tag and push images with
+  cluster-up       create the cluster and write a kubeconfig
+  cluster-down     delete the cluster and the registry
+  helm-set         print the chart values this cluster needs, one KEY=VALUE per
+                   line, for the installer's SNAPSHOT_E2E_HELM_SET
 
 environment:
   SNAPSHOT_E2E_KUBECONFIG   where to write the kubeconfig (required; the file
@@ -56,6 +76,8 @@ environment:
                             you want to keep)
   SNAPSHOT_E2E_K3D_CLUSTER  cluster name (default: snapshot-k3d-cpu)
   SNAPSHOT_E2E_K3S_IMAGE    k3s node image (default: v1.32.13-k3s1)
+  SNAPSHOT_E2E_K3D_REGISTRY       registry name (default: snapshot-registry)
+  SNAPSHOT_E2E_K3D_REGISTRY_PORT  host port for it (default: 5000)
   SNAPSHOT_E2E_PVC_SIZE, SNAPSHOT_E2E_STORAGE_CLASS,
   SNAPSHOT_E2E_CHECKPOINT_HOST
 EOF
@@ -66,10 +88,12 @@ log() {
   echo "[$(date +%H:%M:%S)] $*"
 }
 
+# Named explicitly by each caller rather than fixed, because the registry is
+# usable before kubectl is installed and should not insist on it.
 require_tools() {
   local missing=()
   local tool
-  for tool in docker k3d kubectl; do
+  for tool in "$@"; do
     command -v "${tool}" >/dev/null 2>&1 || missing+=("${tool}")
   done
   if ((${#missing[@]})); then
@@ -78,10 +102,61 @@ require_tools() {
   fi
 }
 
+registry_up() {
+  require_tools docker k3d
+  if k3d registry list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${REGISTRY_HOST}"; then
+    log "deleting leftover registry ${REGISTRY_HOST}"
+    k3d registry delete "${REGISTRY_HOST}"
+  fi
+
+  log "creating registry ${REGISTRY_HOST} on localhost:${REGISTRY_PORT}"
+  k3d registry create "${REGISTRY_NAME}" --port "${REGISTRY_PORT}"
+}
+
+registry_down() {
+  log "deleting registry ${REGISTRY_HOST}"
+  k3d registry delete "${REGISTRY_HOST}" || true
+}
+
+# Teach the node that localhost:PORT means the registry container.
+#
+# The push side and the pull side cannot use one name. From the runner the
+# registry is a published port on localhost; from inside the cluster localhost
+# is the node itself, and the registry is another container on the same Docker
+# network. Writing the mirror here lets both sides keep the reference they can
+# actually resolve, while the image is pushed and pulled under one tag.
+registry_mirror_config() {
+  cat <<EOF
+mirrors:
+  "localhost:${REGISTRY_PORT}":
+    endpoint:
+      - http://${REGISTRY_HOST}:5000
+EOF
+}
+
 create_cluster() {
   if k3d cluster list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${CLUSTER_NAME}"; then
     log "deleting leftover cluster ${CLUSTER_NAME}"
     k3d cluster delete "${CLUSTER_NAME}"
+  fi
+
+  # Expanded below as ${registry_args[@]+...}, because bash 3.2 -- still what
+  # macOS ships -- treats an empty "${array[@]}" under `set -u` as unbound.
+  local registry_args=()
+  if k3d registry list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${REGISTRY_HOST}"; then
+    local config
+    config="$(mktemp)"
+    registry_mirror_config >"${config}"
+    # --registry-use joins the registry to the cluster network so the node can
+    # resolve it at all; --registry-config is what makes the localhost tag
+    # resolve there. Both are needed, and neither implies the other.
+    registry_args=(
+      --registry-use "${REGISTRY_HOST}:${REGISTRY_PORT}"
+      --registry-config "${config}"
+    )
+    log "wiring cluster to registry ${REGISTRY_HOST}"
+  else
+    log "no registry ${REGISTRY_HOST}; the cluster will only see preloaded images"
   fi
 
   log "creating cluster ${CLUSTER_NAME} (${K3S_IMAGE})"
@@ -93,6 +168,7 @@ create_cluster() {
     --kubeconfig-update-default=false \
     --kubeconfig-switch-context=false \
     --k3s-arg '--disable=traefik@server:0' \
+    ${registry_args[@]+"${registry_args[@]}"} \
     --volume "${HOST_CHECKPOINTS}:${NODE_CHECKPOINTS}@server:0"
 
   mkdir -p "$(dirname "${KUBECONFIG_OUT}")"
@@ -178,7 +254,7 @@ EOF
 }
 
 cluster_up() {
-  require_tools
+  require_tools docker k3d kubectl
   if [[ -z "${KUBECONFIG_OUT}" ]]; then
     echo "SNAPSHOT_E2E_KUBECONFIG is required: it names the file to write" >&2
     exit 1
@@ -199,9 +275,14 @@ cluster_up() {
 cluster_down() {
   log "deleting cluster ${CLUSTER_NAME}"
   k3d cluster delete "${CLUSTER_NAME}" || true
+  # After the cluster: deleting the registry first would leave the node with a
+  # mirror pointing at nothing, and k3d logs that as an error on teardown.
+  registry_down
 }
 
 case "${1:-}" in
+registry-up) registry_up ;;
+registry-prefix) echo "localhost:${REGISTRY_PORT}" ;;
 cluster-up) cluster_up ;;
 cluster-down) cluster_down ;;
 helm-set) print_helm_set ;;

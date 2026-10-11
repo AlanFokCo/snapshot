@@ -27,7 +27,8 @@ AGENT_PLATFORM ?= linux/amd64
 
 .PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
-        capture-base-packages verify-base-packages \
+        capture-base-packages verify-base-packages print-agent-base-image \
+        docker-export-agent-bundle \
         linux-build linux-test pagebroker-check-generated cpu-e2e
 
 CRD_SRC_DIR   := api/v1alpha1/crds
@@ -164,6 +165,12 @@ verify-base-packages:
 	diff -u agent/compliance/base-packages.tsv "$$tmp" || \
 	  (echo "ERROR: agent/compliance/base-packages.tsv is stale for $(AGENT_BASE_IMAGE) — run 'make capture-base-packages' and commit"; exit 1)
 
+# CI pulls this base explicitly, so that the cost of fetching it is charged to
+# a step of its own rather than hidden inside the agent build below. A target
+# rather than a second copy of the sed above, so the digest stays in one place.
+print-agent-base-image:
+	@echo '$(AGENT_BASE_IMAGE)'
+
 docker-build-agent: verify-base-packages
 	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
 	  --build-arg "GO_VERSION=$(GO_VERSION)" \
@@ -171,6 +178,19 @@ docker-build-agent: verify-base-packages
 	  --build-context=api=./api --build-context=compliance=./hack/compliance \
 	  --target agent \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) agent/
+
+# The restore bundle, extracted to BUNDLE_DEST, for hack/verify-bundle-glibc.sh.
+# Same build as above up to the agent stage, so a warm cache makes this close
+# to free; the point is to get the bundle without putting a CUDA-based image
+# into a Docker daemon just to copy one directory out of it.
+BUNDLE_DEST ?= ./.agent-bundle
+docker-export-agent-bundle:
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
+	  --build-arg "GO_VERSION=$(GO_VERSION)" \
+	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
+	  --build-context=api=./api --build-context=compliance=./hack/compliance \
+	  --target bundle-export \
+	  --output "type=local,dest=$(BUNDLE_DEST)" agent/
 
 docker-build-operator:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f operator/Dockerfile \

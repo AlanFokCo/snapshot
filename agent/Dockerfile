@@ -425,3 +425,16 @@ RUN mkdir -p /checkpoints /var/run/snapshot
 USER root
 
 ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
+
+# =============================================================================
+# Stage: Bundle export - the restore bundle on its own
+# =============================================================================
+# hack/verify-bundle-glibc.sh checks the bundle against an older userspace than
+# the agent is built on. It used to read the bundle out of the agent image,
+# which required that image to be in a Docker daemon; CI no longer loads it
+# there, because unpacking a CUDA-based image costs more than the check does.
+# Exporting the bundle alone keeps the check cheap:
+#
+#   docker buildx build --target bundle-export --output type=local,dest=<dir> .
+FROM scratch AS bundle-export
+COPY --from=agent /snapshot-binaries/ /
