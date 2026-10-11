@@ -1,6 +1,6 @@
 module github.com/ai-dynamo/snapshot/agent
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/ai-dynamo/snapshot/api v0.0.0
@@ -15,7 +15,7 @@ require (
 	github.com/prometheus/procfs v0.19.2
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/zap v1.27.1
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
 	gopkg.in/yaml.v3 v3.0.1
@@ -104,10 +104,10 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
+	golang.org/x/term v0.46.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
