@@ -1,6 +1,6 @@
 module github.com/ai-dynamo/snapshot/api
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/opencontainers/go-digest v1.0.0
@@ -18,7 +18,7 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	// Pinned above the graph minimum (v0.40.0) to clear a dependency-scan
 	// finding; see #402. Keep agent and operator on the same version.
 	golang.org/x/text v0.42.0 // indirect

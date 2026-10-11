@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Unified Dockerfile for snapshot-agent and placeholder images.
+# Dockerfile for the snapshot-agent image.
 #
 # Build targets. Two named build contexts are required for the agent: `api`
 # (the agent module depends on it via `replace => ../api`) and `compliance`
@@ -9,8 +9,6 @@
 #   docker build --platform linux/amd64 --target agent \
 #     --build-context api=../api --build-context compliance=../hack/compliance \
 #     -t snapshot-agent:latest .
-#   docker build --platform linux/amd64 --target placeholder --build-context api=../api \
-#     --build-arg BASE_IMAGE=<app-image> -t placeholder:latest .
 #
 # Optional targets for CI:
 #   docker build --target linter --build-context api=../api .   # Run linting
@@ -20,17 +18,17 @@
 # Build Arguments
 # =============================================================================
 ARG DOCKER_PROXY
-ARG GO_VERSION=1.27.1
+ARG GO_VERSION=1.27.2
 # Digest of golang:${GO_VERSION}. A digest is content-addressed, so it resolves
 # identically through DOCKER_PROXY pull-through mirrors. Docker resolves
 # tag@digest by digest and never checks the tag against it, so the two must be
 # updated together — the go-base stage asserts they agree rather than trusting
 # the tag.
-ARG GO_IMAGE_DIGEST=sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea
+ARG GO_IMAGE_DIGEST=sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
 # Keep in step with GOLANGCI_LINT_VERSION in hack/tools.mk. Used by the linter
 # stage, which is a developer target (`--target linter`) and so is not covered
 # by the CI `check` job.
-ARG GOLANGCI_LINT_VERSION=v2.13.2
+ARG GOLANGCI_LINT_VERSION=v2.14.0
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
@@ -39,10 +37,6 @@ ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
 ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
-
-# For placeholder target only - this default allows agent builds to succeed,
-# but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
-ARG BASE_IMAGE=placeholder-requires-base-image-arg
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
@@ -113,6 +107,9 @@ ARG TARGETARCH=amd64
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
+# Static: it runs as PID 1 inside the user's restore image, which may not
+# carry a compatible libc or loader.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-restore-proxy ./cmd/snapshot-restore-proxy
 
 # Corresponding source for the Go modules compiled into the binaries above.
 RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
@@ -135,6 +132,61 @@ RUN make -C cmd/cuda-checkpoint-helper helper CUDA_ROOT=/opt/cuda \
 
 # The mount helper needs no CUDA headers, only mount_setattr (Linux 5.12+).
 RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount cmd/ns-bind-mount/main.c
+
+# =============================================================================
+# Stage: cuInterpose shim, coordinator, and launcher
+# =============================================================================
+# C frontend and Rust core. Pinned GNU builder and static musl tools.
+# GCC 15 builds the C frontend, which requires musttail. The Bookworm image supplies
+# glibc 2.36.
+FROM gcc:15.2.0-bookworm@sha256:9ca91b05c7b07d2979f16413e8b2cd6ec8a7c80ffca4121ccab0aeba33f90460 AS gcc-15
+
+FROM rust:1.95.0-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS cuinterpose-builder
+COPY --from=cuda-headers /usr/local/cuda/include/cuda.h /opt/cuda/include/cuda.h
+COPY --from=gcc-15 /usr/local/bin/ /opt/gcc-15/bin/
+COPY --from=gcc-15 /usr/local/lib/gcc/ /opt/gcc-15/lib/gcc/
+COPY --from=gcc-15 /usr/local/libexec/gcc/ /opt/gcc-15/libexec/gcc/
+COPY --from=gcc-15 /usr/local/lib64/ /opt/gcc-15/lib64/
+RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
+    && apt-get update && apt-get install -y --no-install-recommends \
+       musl-tools make gcc binutils \
+    && rm -rf /var/lib/apt/lists/* \
+    && cargo install cbindgen --version 0.29.4 --locked \
+    && rustup target add x86_64-unknown-linux-musl \
+    && rustup component add rust-src rustfmt clippy
+WORKDIR /cuinterpose
+COPY cmd/cuinterpose/ ./
+# make frontend checks the cbindgen CLI against the locked ABI dev-dependency.
+RUN make native
+# Keep matching dependency and standard-library sources as part of the image's
+# source bundle. This is a packaging policy, not a special Rust source requirement.
+RUN mkdir -p /rust-sources && cd rust && cargo vendor --locked /rust-sources/vendor \
+    && cp Cargo.lock /rust-sources/ \
+    && rustc --version > /rust-sources/toolchain-version.txt \
+    && cp -a "$(rustc --print sysroot)/lib/rustlib/src/rust" /rust-sources/standard-library \
+    && cp -a "$(rustc --print sysroot)/share/doc/rust" /rust-sources/toolchain-notices
+
+# Python generates the Rust notices below.
+FROM cuinterpose-builder AS cuinterpose-notices
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY compliance/rust_licenses.py compliance/test_rust_licenses.py /tmp/rust-notices/
+RUN python3 -m unittest discover -s /tmp/rust-notices \
+    && python3 /tmp/rust-notices/rust_licenses.py /rust-sources /rust-sources/NOTICES.txt
+
+# Both the agent and the CPU installer test use this exact workload payload.
+FROM scratch AS cuinterpose-payload
+COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
+COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose_core.so /usr/local/lib/snapshot/libcuinterpose_core.so
+COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-launch /usr/local/bin/cuinterpose-launch
+
+FROM cuinterpose-notices AS cuinterpose-test
+COPY --from=cuinterpose-payload / /
+RUN make test-native
+RUN /usr/local/bin/cuinterpose-launch --library /usr/local/lib/snapshot/libcuinterpose.so -- /bin/true
+
+FROM scratch AS cuinterpose-export
+COPY --from=cuinterpose-builder /cuinterpose/build/ /
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -181,8 +233,6 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
       -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
       /tmp/snapshot_inet_remap.c
 
-RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
-
 # CRIU source at the exact ref built from: this is a from-source build, and
 # CRIU_REF may be a moving branch.
 RUN tar -czf /criu-src.tar.gz -C /tmp --exclude-vcs criu
@@ -197,7 +247,7 @@ FROM ${AGENT_BASE_IMAGE} AS runtime-deps
 ARG TARGETARCH=amd64
 
 RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
+      echo "ERROR: Snapshot supports x86_64 only, not ${TARGETARCH}" >&2; exit 1; \
     fi
 
 # Install CRIU runtime dependencies
@@ -249,14 +299,19 @@ COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version
 
-# Copy CUDA checkpoint binaries
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
+# Native checkpoint/restore uses the in-repository helper. The optional workload
+# launch-job wrapper uses the standalone binary supplied by the workload image.
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-coordinator /usr/local/bin/cuinterpose-coordinator
+# The operator copies the launcher into source workloads. It execs the application,
+# so restore needs the libraries and coordinator, but no launcher in the bundle.
+COPY --from=cuinterpose-payload / /
+COPY --from=cuinterpose-notices /rust-sources/ /legal/cuinterpose/rust/
+COPY cmd/cuinterpose/ /legal/cuinterpose/source/
 # nsmount resolves this helper at /usr/local/sbin/ns-bind-mount (see
 # agent/internal/nsmount/mount.go defaultBinaryPath).
 COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
+RUN chmod +x /usr/local/bin/cuda-checkpoint-helper \
     /usr/local/sbin/ns-bind-mount
 
 # Copy the built binaries
@@ -268,10 +323,14 @@ COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 # mechanisms into the mount: criu's libdir -> criu-plugins/ (criu.overrideLibDir),
 # LD_LIBRARY_PATH -> lib/, and PATH -> the bundle root.
 RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
+RUN mkdir -p /snapshot-binaries/snapshot-cuda \
+    && install -m 0644 /usr/local/lib/snapshot/libcuinterpose.so /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
+    && install -m 0644 /usr/local/lib/snapshot/libcuinterpose_core.so /snapshot-binaries/snapshot-cuda/libcuinterpose_core.so \
+    && install -m 0755 /usr/local/bin/cuinterpose-coordinator /snapshot-binaries/cuinterpose-coordinator
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
+COPY --from=builder /snapshot-restore-proxy /snapshot-binaries/snapshot-restore-proxy
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
 
 # Network binaries needed during restore:
@@ -281,19 +340,20 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
 # criu never forks iptables-restore/ip6tables-restore on this path and neither
 # binary needs to be in the bundle. See BuildRestoreOpts for why SKIP is safe
 # for restore specifically.
-# All resolve through PATH inside the namespace.
+# ip resolves through PATH inside the namespace; tar is invoked by absolute
+# path under the bundled loader (see the libc/ stage below).
 RUN set -eu; \
     cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
-    chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
-             /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
+    chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore /snapshot-binaries/snapshot-restore-proxy \
+             /snapshot-binaries/cuda-checkpoint-helper \
              /snapshot-binaries/ip /snapshot-binaries/tar
 
 # Shared-library closure of the bundled binaries and plugins.
 #
 # glibc (libc, libm, libpthread, libdl, librt, libresolv) and the loader are
-# deliberately excluded: the kernel reads PT_INTERP before LD_LIBRARY_PATH
-# applies, so the loader always comes from the placeholder, and glibc's loader
-# and libc are version-locked — pairing them across builds breaks at exec.
+# deliberately excluded from lib/, which is on LD_LIBRARY_PATH for the directly
+# exec'd binaries; tar gets its own matched pair in libc/ below. The bundle
+# layout comment in agent/internal/nsmount/injector.go has the reasoning.
 # Also excluded: libmvec, libutil, libanl, libnsl, libthread_db — same glibc
 # version-lock; libm matches only when followed by '.' or '-', not libmvec.
 # libcuda/libnvidia are excluded because they are injected by the NVIDIA
@@ -321,6 +381,35 @@ RUN set -eu; \
       fi; \
     done
 
+# Matched loader + glibc for the bundled tar, which runtime.restoreTarCmd
+# invokes as `ld-linux-x86-64.so.2 --library-path ... tar`. This is what lets
+# tar run on placeholders older than AGENT_BASE_IMAGE. Keep it out of lib/ —
+# see the bundle layout comment in agent/internal/nsmount/injector.go.
+RUN set -eu; \
+    mkdir -p /snapshot-binaries/libc; \
+    cp -L /lib64/ld-linux-x86-64.so.2 /snapshot-binaries/libc/; \
+    ldd /snapshot-binaries/tar | awk '/=> \//{print $3}' \
+    | grep -E '/(libc|libm|libmvec|libdl|libpthread|librt|libresolv)[.-]' \
+    | xargs -r -I{} cp -Ln {} /snapshot-binaries/libc/
+
+# Post-condition: every library the loader-invoked tar resolves must come from
+# the bundle. Asserting "not found" is not enough — this stage's own glibc
+# satisfies the loader just as well, so an omitted libc/ would build green here
+# and only fail on a placeholder older than AGENT_BASE_IMAGE, which is the bug
+# this arrangement exists to prevent.
+RUN set -eu; \
+    LOADER=/snapshot-binaries/libc/ld-linux-x86-64.so.2; \
+    LIBPATH=/snapshot-binaries/libc:/snapshot-binaries/lib; \
+    escaped=$("$LOADER" --library-path "$LIBPATH" --list /snapshot-binaries/tar \
+              | awk '/=>/{print $3}' | grep -v '^/snapshot-binaries/' || true); \
+    if [ -n "$escaped" ]; then \
+      echo "ERROR: bundled tar resolves outside the bundle:" >&2; \
+      echo "$escaped" >&2; \
+      "$LOADER" --library-path "$LIBPATH" --list /snapshot-binaries/tar >&2; \
+      exit 1; \
+    fi; \
+    "$LOADER" --library-path "$LIBPATH" /snapshot-binaries/tar --version >/dev/null
+
 COPY --from=sources /sources /legal/source
 
 # Attribution generated from the delta manifest and the vendored modules.
@@ -336,53 +425,3 @@ RUN mkdir -p /checkpoints /var/run/snapshot
 USER root
 
 ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
-
-# =============================================================================
-# Stage: Placeholder - Runtime-compatible restore image (requires BASE_IMAGE arg)
-#
-# This is the runtime image with the same default execution contract
-# (entrypoint/cmd), running as root so the agent can restore into it. It ships
-# NO checkpoint/restore tooling: criu, nsrestore, the cuda-checkpoint binaries,
-# their shared libraries, and the criu plugins are all bind-mounted on demand
-# from the agent's /snapshot-binaries bundle at restore time (internal/nsmount).
-# The mount destination is created by the ns-bind-mount helper inside this
-# namespace, so nothing needs pre-provisioning here.
-#
-# Three constraints follow from that and must hold for every BASE_IMAGE:
-#   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE, because the
-#     bundle's library closure is built from AGENT_BASE_IMAGE (ubuntu 24.04,
-#     glibc 2.39) and loaded ahead of the placeholder's own libraries via
-#     LD_LIBRARY_PATH. A 22.04-based BASE_IMAGE builds green but fails at
-#     restore with "version 'GLIBC_2.38' not found".
-#   - The node kernel must be >= 5.12 (mount_setattr, used by ns-bind-mount).
-#   - The placeholder pod must NOT set readOnlyRootFilesystem: true unless a
-#     writable volume is mounted at /tmp. The agent bind-mounts the binary
-#     bundle into the placeholder's /tmp at restore time; with a read-only
-#     root and nothing mounted at /tmp, creating the mount point fails with
-#     EROFS. An emptyDir at /tmp (either medium) makes it work again, since
-#     volume mounts stay writable independently of the root filesystem.
-#
-# cuda-checkpoint wrapping is opt-in (--cuda-checkpoint-wrap in snapshotctl).
-# When used, the source workload image must have cuda-checkpoint at the same
-# path as it runs from — CRIU restores file-backed mappings by path, not via
-# PATH search — and so must this placeholder image (same BASE_IMAGE).
-#
-# Standby-aware workload entrypoints stay inert when the restore Pod sets
-# SNAPSHOT_RESTORE_STANDBY=1, then sleep while the snapshot-agent restores
-# into the container.
-# =============================================================================
-FROM ${BASE_IMAGE} AS placeholder
-
-ARG BASE_IMAGE
-ARG TARGETARCH=amd64
-ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
-
-USER root
-
-RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Snapshot requires x86_64" >&2; exit 1; \
-    fi
-
-# Checkpoint volume mount point. This is a storage concern — no restore tooling
-# is provisioned here; see the stage comment above.
-RUN mkdir -p /checkpoints

@@ -4,6 +4,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
+#include <stdexcept>
+
+#include "fatal_cleanup.hpp"
 
 namespace snapshot::pagebroker {
 class Cancellation {
@@ -17,7 +21,19 @@ class Cancellation {
   void Cancel() { cancelled_.store(true, std::memory_order_relaxed); }
   bool DeadlineExceeded() const { return Clock::now() >= deadline_; }
   bool IsCancelled() const {
-    return cancelled_.load(std::memory_order_relaxed) || DeadlineExceeded() || (parent_ && parent_->IsCancelled());
+    return FatalCleanupPending() || cancelled_.load(std::memory_order_relaxed) || DeadlineExceeded() || (parent_ && parent_->IsCancelled());
+  }
+
+  void ThrowIfCancelled() const {
+    if (!IsCancelled()) {
+      return;
+    }
+    for (const Cancellation* token = this; token; token = token->parent_) {
+      if (token->DeadlineExceeded()) {
+        throw std::runtime_error("operation deadline exceeded");
+      }
+    }
+    throw std::runtime_error("operation cancelled");
   }
 
  private:
@@ -25,4 +41,5 @@ class Cancellation {
   Clock::time_point deadline_ = Clock::time_point::max();
   const Cancellation* parent_ = nullptr;
 };
+using CancellationPtr = std::shared_ptr<Cancellation>;
 }  // namespace snapshot::pagebroker

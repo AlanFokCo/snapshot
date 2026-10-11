@@ -202,6 +202,30 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `storage.pvc.storageClass` | `""` | Storage class; empty uses the cluster default. Must support `ReadWriteMany`. |
 | `storage.pvc.basePath` | `/checkpoints` | Fixed agent mount path; cannot be changed. |
 
+### PageBroker GPU engine
+
+PageBroker runs in a persistent container in the agent DaemonSet. Its GPU engine
+uses CustomStorage for capture when PageBroker is enabled and the driver
+supports it. A pod opts out with `nvidia.com/snapshot-pagebroker: "false"`, and
+its capture uses the driver-managed format. The agent runs CRIU. Restoring a
+CustomStorage artifact requires PageBroker and cannot opt out. GPU payloads are read directly from the original checkpoint.
+`pageBroker.restoreMode` selects whether CRIU reads CPU images directly (the
+default) or from tmpfs staging. Restore uses the format recorded in the artifact.
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `pageBroker.enabled` | `true` | Deploy and use PageBroker. |
+| `pageBroker.maxConcurrentRequests` | `16` | Concurrent control request limit. |
+| `pageBroker.transferBufferCount` | `32` | Persistent ring slots per visible GPU. |
+| `pageBroker.transferChunkBytes` | `134217728` | Bytes per slot before allocation rounding. |
+| `pageBroker.maxPinnedBytes` | `0` | Total pinned memory limit. Zero sets no limit. |
+| `pageBroker.resources` | 8 CPU / 32Gi request, 32 CPU / 256Gi limit | Resources for the broker and embedded GPU engine. |
+
+The default rings reserve 4 GiB per GPU, or 32 GiB for eight GPUs, plus overhead.
+PageBroker checks the memory budget before it reports GPU readiness. It checks
+manifest structure and exact extent lengths. It does not generate or verify GPU
+payload checksums.
+
 ### Agent DaemonSet and access
 
 | Value | Default | Description |
@@ -210,6 +234,7 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `daemonset.resources` | 4 CPU / 4Gi limit | Agent resource requests and limits. |
 | `daemonset.nodeSelector` | `nvidia.com/gpu.present: "true"` | Targets GPU nodes. |
 | `daemonset.tolerations` | GPU + `dedicated` | Node tolerations. |
+| `daemonset.runtimeClassName` | `nvidia` | RuntimeClass for the agent pod; `""` omits it, for nodes where the NVIDIA runtime is containerd's default. |
 | `daemonset.imagePullSecrets` | `ngc-secret` | Pull secrets for the agent image. |
 | `seccomp.deploy` | `true` | Install the block-iouring seccomp profile (required for CRIU; set `false` on RHCOS 9.6+). |
 | `rbac.create` | `true` | Create agent and operator RBAC. |

@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.2"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.2"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -54,7 +54,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.2"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -78,13 +78,21 @@ jobs:
           download-from-astral-mirror: "false"
       - run: |
           uv run --locked --project e2e pytest \
+            e2e/tests/test_agent_container.py \
             e2e/tests/test_benchmark.py \
             e2e/tests/test_benchmark_outcomes.py \
             e2e/tests/test_benchmark_history.py \
             e2e/tests/test_benchmark_preview.py \
             e2e/tests/test_framework_manifests.py \
+            e2e/tests/test_pod_status_writers.py \
+            e2e/tests/test_required_tests.py \
+            e2e/tests/test_resolve_snapshot_image_tag.py \
+            e2e/tests/test_restored_state.py \
             e2e/tests/test_runtime_image_id.py \
+            e2e/tests/test_setup_chart_command.py \
             e2e/tests/test_setup_helm_overrides.py \
+            e2e/tests/test_upgrade_e2e_gate.py \
+            e2e/tests/test_upgrade_harness.py \
             e2e/tests/test_workload_node_targeting.py \
             e2e/tests/test_workload_scripts.py -vv
 

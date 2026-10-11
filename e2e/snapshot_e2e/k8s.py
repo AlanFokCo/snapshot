@@ -213,14 +213,22 @@ def exec_command(
 PAYLOAD_MARKER = "e2e-payload-follows"
 
 
-def exec_payload(namespace: str, pod: str, command: str) -> str:
+def exec_payload(
+    namespace: str,
+    pod: str,
+    command: str,
+    *,
+    container: str | None = None,
+) -> str:
     """Exec output with whatever the login shell printed first dropped.
 
     exec_command merges stderr into the stream, so a container whose profile
     writes anything breaks every caller that parses the result rather than
     matching a substring in it.
     """
-    output = exec_command(namespace, pod, f"echo {PAYLOAD_MARKER}; {command}")
+    output = exec_command(
+        namespace, pod, f"echo {PAYLOAD_MARKER}; {command}", container=container
+    )
     _, marker, payload = output.partition(PAYLOAD_MARKER)
     if not marker:
         raise AssertionError(f"exec output carried no payload marker: {output!r}")
@@ -333,3 +341,31 @@ def daemonset_readiness_detail(daemonset: client.V1DaemonSet) -> str:
 
 def api_error_detail(exc: ApiException) -> str:
     return f"status={exc.status}, reason={exc.reason}, body={exc.body}"
+
+
+def pod_status_writers(pod: client.V1Pod) -> list[str]:
+    writers = []
+    for entry in pod.metadata.managed_fields or []:
+        status = (entry.fields_v1 or {}).get("f:status") or {}
+        fields = sorted(key.removeprefix("f:") for key in status)
+        if not fields:
+            continue
+        conditions = sorted(
+            key.split('"type":"', 1)[-1].rstrip('"}')
+            for key in (status.get("f:conditions") or {})
+            if key.startswith("k:")
+        )
+        writers.append(
+            f"{entry.manager} {entry.operation} subresource={entry.subresource} at={entry.time} "
+            f"status={fields} conditions={conditions}"
+        )
+    return writers
+
+
+def status_sync_errors(namespace: str) -> list[client.CoreV1Event]:
+    return [
+        event
+        for event in list_events(namespace, field_selector={"type": "Warning"})
+        if event.reason == "SyncError"
+    ]
+

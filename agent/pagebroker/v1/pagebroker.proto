@@ -24,6 +24,7 @@ message IOEngine
   oneof kind
   {
     PosixCopyIOEngine posix_copy = 1;
+    NixlIOEngine nixl = 2;
   }
 }
 
@@ -143,6 +144,8 @@ message Failure
     STORAGE_ERROR = 5;
     // The operation failed or was cancelled. Abort the transaction before retrying.
     INTERNAL_ERROR = 6;
+    // PageBroker is stopping or its GPU handler budget is full. No operation started.
+    UNAVAILABLE = 7;
   }
   optional Code code = 1;
   optional string message = 2;
@@ -165,3 +168,6 @@ message Response
     Capabilities capabilities = 12;
   }
 }
+
+// Registered-buffer transfers. Directory staging is not implemented for NIXL.
+message NixlIOEngine {}

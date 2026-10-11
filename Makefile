@@ -20,7 +20,7 @@ DOCKER_BUILD_ARGS ?=
 # committed package baseline would describe a different image than we build on.
 AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfile)
 
-# The agent is x86_64-only (cuda-checkpoint ships no other arch) and the package
+# The agent supports x86_64 only and the package
 # baseline is captured for this platform, so pin it rather than inheriting
 # whatever the buildx builder defaults to.
 AGENT_PLATFORM ?= linux/amd64
@@ -28,7 +28,7 @@ AGENT_PLATFORM ?= linux/amd64
 .PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
         capture-base-packages verify-base-packages \
-        linux-build linux-test pagebroker-check-generated
+        linux-build linux-test pagebroker-check-generated cpu-e2e
 
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
@@ -129,7 +129,9 @@ linux-build:
 	  -e HOME=/tmp -e GOCACHE=/tmp/go-build \
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
-	  make -C agent build
+	  make -C agent go-build
+	# buildx uses the host Docker connection, which is not passed into the Go container.
+	$(MAKE) -C agent cuinterpose-build
 
 linux-test:
 	docker run --rm \
@@ -138,6 +140,12 @@ linux-test:
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
 	  make -C agent test
+	$(MAKE) -C agent cuinterpose-test
+
+# Build, spin up a k3d cluster, install Snapshot, and run the CPU e2e suite.
+# Needs a linux/amd64 Docker daemon; CI runs the same sequence in e2e-cpu.yaml.
+cpu-e2e:
+	@bash hack/cpu-e2e.sh
 
 # Refresh the agent's base-image package baseline. Run whenever AGENT_BASE_IMAGE
 # changes; verify-base-packages fails the agent build if you forget.

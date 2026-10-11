@@ -32,8 +32,76 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
+
+func TestPreflightCuInterpose(t *testing.T) {
+	launched := append(podcontract.CuInterposeLauncherPrefix(), "worker")
+	for _, tc := range []struct {
+		name, annotation string
+		command          []string
+		requested        bool
+		wantError        string
+	}{
+		{name: "native", command: []string{"worker"}},
+		{name: "disabled with launcher", annotation: "disabled", command: launched},
+		{name: "launcher without annotation", command: launched},
+		{name: "enabled", annotation: "enabled", command: launched, requested: true},
+		{name: "enabled without launcher", annotation: "enabled", command: []string{"worker"}, wantError: "must start with"},
+		{name: "malformed annotation", annotation: "yes", command: launched, wantError: "expected enabled or disabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Command: tc.command}}}}
+			if tc.annotation != "" {
+				pod.Annotations = map[string]string{podcontract.CuInterposeAnnotation: tc.annotation}
+			}
+			requested, err := preflightCuInterpose(pod, "main")
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.requested, requested)
+		})
+	}
+}
+
+// TestReconcileCapture_CuInterposeWithoutLauncherFails proves a misconfigured opt-in
+// fails without waiting for readiness and without touching the source.
+func TestReconcileCapture_CuInterposeWithoutLauncherFails(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	pod.Annotations = map[string]string{podcontract.CuInterposeAnnotation: "enabled"}
+	pod.Spec.Containers = []corev1.Container{{Name: "main", Command: []string{"worker"}}}
+	pod.Status.ContainerStatuses[0].Ready = false
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	assert.False(t, fc.wasCalled())
+	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "CuInterposeMisconfigured", cond.Reason)
+}
+
+// TestReconcileCapture_CuInterposeOptInReachesCapture proves a launched opt-in
+// reaches the capture seam with the request set.
+func TestReconcileCapture_CuInterposeOptInReachesCapture(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	pod.Annotations = map[string]string{podcontract.CuInterposeAnnotation: "enabled"}
+	pod.Spec.Containers = []corev1.Container{{Name: "main", Command: append(podcontract.CuInterposeLauncherPrefix(), "worker")}}
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	require.True(t, fc.wasCalled())
+	assert.True(t, fc.lastParams().CuInterposeRequested)
+}
 
 // fakeCheckpointer records calls behind the checkpointFn seam and returns a configured error.
 type fakeCheckpointer struct {
@@ -731,7 +799,7 @@ func TestRunCheckpoint_WritesReady(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 	artifactPath := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
 
-	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), artifactPath))
+	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, false, string(content.UID), artifactPath))
 
 	assert.True(t, fc.wasCalled())
 	require.NotNil(t, meta.FindStatusCondition(
@@ -748,7 +816,7 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	artifactPath := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
 
 	// A recorded failure is a settled outcome, so the queue is told not to retry it.
-	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), artifactPath))
+	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, false, string(content.UID), artifactPath))
 
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
@@ -756,7 +824,7 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	assert.Equal(t, "CheckpointFailed", cond.Reason)
 }
 
-func TestExecutorCheckpointPageBrokerPrepareFailureDoesNotKill(t *testing.T) {
+func TestExecutorCheckpointInspectionFailureDoesNotKill(t *testing.T) {
 	w := makeNodeController(t, &fakeCheckpointer{})
 	w.config.PageBroker = snapshottypes.PageBrokerSpec{
 		Enabled:           true,
@@ -772,17 +840,17 @@ func TestExecutorCheckpointPageBrokerPrepareFailureDoesNotKill(t *testing.T) {
 		Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name:      "worker-0",
 			Namespace: "inference",
-			Annotations: map[string]string{
-				snapshotv1alpha1.PageBrokerAnnotation: snapshotv1alpha1.PageBrokerAnnotationEnabled,
-			},
 		}},
 		ContainerName: "main",
 		ContainerID:   "abc123",
 		ContainerPID:  target.Process.Pid,
 		ContentUID:    "content-uid",
 	})
-	require.ErrorContains(t, err, "prepare PageBroker checkpoint")
-	require.NoError(t, target.Process.Signal(syscall.Signal(0)), "PageBroker preflight failure must not kill the source")
+	require.ErrorContains(t, err, "failed to resolve container")
+	var status syscall.WaitStatus
+	waitedPID, waitErr := syscall.Wait4(target.Process.Pid, &status, syscall.WNOHANG, nil)
+	require.NoError(t, waitErr)
+	require.Zero(t, waitedPID, "preflight failure must not kill the source")
 	require.NoError(t, ctx.Err())
 }
 
@@ -1017,7 +1085,7 @@ func TestRunCheckpoint_TimeoutFailsTheWorkOrder(t *testing.T) {
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 
-	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), t.TempDir()))
+	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, false, string(content.UID), t.TempDir()))
 
 	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond, "a timed-out dump must reach a terminal status")
@@ -1037,7 +1105,7 @@ func TestRunCheckpoint_OverrunButSuccessfulDumpIsStillReady(t *testing.T) {
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 
-	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), t.TempDir()))
+	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, false, string(content.UID), t.TempDir()))
 
 	got := getContent(t, w, content.Name)
 	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady),

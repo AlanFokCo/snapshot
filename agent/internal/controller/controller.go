@@ -63,8 +63,8 @@ type NodeController struct {
 	injector                executor.RestoreMounter
 	log                     logr.Logger
 	checkpointFn            func(ctx context.Context, params CheckpointParams) error
-	restoreFn               func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error)
-	writeControlSentinelFn  func(int, string) error
+	restoreFn               func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
+	writeControlSentinelFn  func(int, string, []byte) error
 	controlSentinelExistsFn func(int, string) (bool, error)
 	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
@@ -116,7 +116,8 @@ const (
 type restoreResult struct {
 	destination string
 	state       restoreResultState
-	reason      string
+	// reason explains a failed or incompatible outcome.
+	reason string
 }
 
 type restorePendingError struct {
@@ -162,6 +163,10 @@ const (
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
 var podSnapshotContentGVR = snapshotv1alpha1.GroupVersion.WithResource("podsnapshotcontents")
+
+// restoreFailedSentinelContents is informational: readers of restore-failed
+// act on its existence only.
+var restoreFailedSentinelContents = []byte("failed\n")
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
 func NewNodeController(
@@ -688,6 +693,8 @@ type restoreTally struct {
 	incompatible           []string
 	pending                []string
 	incompatibilityReasons []string
+	// failureReasons holds "<destination>: <cause>" for each failed destination.
+	failureReasons []string
 }
 
 type restoreVerdict struct {
@@ -720,6 +727,11 @@ func tallyRestoreResults(results []restoreResult) restoreTally {
 			tally.succeeded = append(tally.succeeded, result.destination)
 		case restoreResultFailed:
 			tally.failed = append(tally.failed, result.destination)
+			reason := result.destination
+			if result.reason != "" {
+				reason = fmt.Sprintf("%s: %s", result.destination, result.reason)
+			}
+			tally.failureReasons = append(tally.failureReasons, reason)
 		case restoreResultPending:
 			tally.pending = append(tally.pending, result.destination)
 		case restoreResultIncompatible:
@@ -752,12 +764,13 @@ func (t restoreTally) verdict(snapshotName string) restoreVerdict {
 				len(t.succeeded), snapshotName, strings.Join(t.succeeded, ", ")),
 		}
 	case len(t.succeeded) != 0:
-		notRestored := append(append([]string{}, t.failed...), t.incompatible...)
+		// Causes can contain commas, so entries are separated by semicolons.
+		notRestored := append(append([]string{}, t.failureReasons...), t.incompatible...)
 		return restoreVerdict{
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonPartiallySucceeded,
 			message: fmt.Sprintf("Restored %d of %d destination containers from PodSnapshot %s; not restored: %s",
-				len(t.succeeded), t.total, snapshotName, strings.Join(notRestored, ", ")),
+				len(t.succeeded), t.total, snapshotName, strings.Join(notRestored, "; ")),
 		}
 	case len(t.failed) == 0:
 		return restoreVerdict{
@@ -769,15 +782,15 @@ func (t restoreTally) verdict(snapshotName string) restoreVerdict {
 		return restoreVerdict{
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonFailed,
-			message: fmt.Sprintf("Restore failed for %d destination container(s) and refused %d incompatible destination(s) from PodSnapshot %s",
-				len(t.failed), len(t.incompatible), snapshotName),
+			message: fmt.Sprintf("Restore failed for %d destination container(s) and refused %d incompatible destination(s) from PodSnapshot %s: %s",
+				len(t.failed), len(t.incompatible), snapshotName, strings.Join(t.failureReasons, "; ")),
 		}
 	default:
 		return restoreVerdict{
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonFailed,
 			message: fmt.Sprintf("Restore failed for all %d destination container(s) from PodSnapshot %s: %s",
-				len(t.failed), snapshotName, strings.Join(t.failed, ", ")),
+				len(t.failed), snapshotName, strings.Join(t.failureReasons, "; ")),
 		}
 	}
 }
@@ -833,6 +846,7 @@ func (w *NodeController) restoreDestination(
 			return result
 		}
 		result.state = restoreResultFailed
+		result.reason = err.Error()
 		log.Error(err, "Restore controller worker failed")
 		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
 		return result
@@ -886,12 +900,13 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 
 // runRestore runs the full restore workflow for one destination container:
 //  1. Call executor.Restore (inspect placeholder → nsrestore inside namespace).
-//     nsrestore clears any stale restore-complete sentinel on the pod control
-//     volume before CRIU, so a prior incarnation cannot release the restored
-//     process early.
-//  2. Write a restore-complete sentinel: the CRIU-restored process resumes
-//     inside the polling loop that waits on this file, exits quiescence,
-//     and resumes the engine
+//     nsrestore clears any stale restore-complete and restore-failed sentinels
+//     on the pod control volume before CRIU, so a prior incarnation cannot
+//     release the restored process early.
+//  2. Write a restore-complete sentinel holding the restored PID: the
+//     CRIU-restored process resumes inside the polling loop that waits on
+//     this file, exits quiescence, and resumes the engine. On failure, write
+//     restore-failed and kill the placeholder instead.
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) error {
 	op := w.newRestoreOperation(pod, plan, destination, containerID, startedAt)
 	if recovering {
@@ -911,7 +926,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		defer cancel()
 	}
 
-	placeholderHostPID, err := op.executeRestore(restoreCtx)
+	restored, err := op.executeRestore(restoreCtx)
 	if err != nil {
 		var incompatible *compat.IncompatibleError
 		if errors.As(err, &incompatible) {
@@ -927,7 +942,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		op.log.Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
 	}
-	return op.completeRestore(ctx, placeholderHostPID)
+	return op.completeRestore(ctx, restored)
 }
 
 // recoverCompletedRestore avoids replaying CRIU when the destination-scoped
@@ -973,7 +988,7 @@ func (w *NodeController) newRestoreOperation(
 	}
 }
 
-func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
+func (op *restoreOperation) executeRestore(ctx context.Context) (executor.RestoreResult, error) {
 	w := op.controller
 	req := executor.RestoreRequest{
 		ContentUID:                  op.artifact.ContentUID,
@@ -987,8 +1002,9 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		DestinationContainerName:    op.destination,
 		SkipCompatCheck:             op.skipCompatCheck,
 		Clientset:                   w.clientset,
-		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] != snapshotv1alpha1.PageBrokerAnnotationDisabled,
 		PageBrokerEnabled:           w.config.PageBroker.Enabled,
+		CustomStorageAvailable:      w.config.CustomStorageAvailable,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
 		PageBrokerRestoreMode:       w.config.PageBroker.RestoreMode,
 	}
@@ -1003,24 +1019,38 @@ func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) e
 	if err != nil {
 		return errors.Join(restoreErr, fmt.Errorf("placeholder PID could not be resolved after restore failure: %w", err))
 	}
+	op.markRestoreFailed(placeholderHostPID)
 	if err := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore failed"); err != nil {
 		return errors.Join(restoreErr, fmt.Errorf("placeholder could not be killed after restore failure: %w", err))
 	}
 	return restoreErr
 }
 
-func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHostPID int) error {
+func (op *restoreOperation) completeRestore(ctx context.Context, restored executor.RestoreResult) error {
 	w := op.controller
+	placeholderHostPID := restored.PlaceholderHostPID
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
-	if err := w.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreCompleteFile); err != nil {
+	contents := podcontract.FormatRestoreComplete(podcontract.RestoreComplete{PID: restored.RestoredPID})
+	if err := w.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreCompleteFile, contents); err != nil {
 		op.log.Error(err, "Failed to write restore-complete sentinel")
+		op.markRestoreFailed(placeholderHostPID)
 		if killErr := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
 			return errors.Join(fmt.Errorf("failed to write restore-complete sentinel: %w", err), fmt.Errorf("placeholder could not be killed: %w", killErr))
 		}
 		return fmt.Errorf("failed to write restore-complete sentinel: %w", err)
 	}
 	return nil
+}
+
+// markRestoreFailed writes the restore-failed sentinel before the caller kills
+// the placeholder, so a restarted container sees that this Pod's one restore
+// was already used instead of waiting for a restore that will not come. It is
+// best effort: the kill must happen whether or not the marker was written.
+func (op *restoreOperation) markRestoreFailed(placeholderHostPID int) {
+	if err := op.controller.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreFailedFile, restoreFailedSentinelContents); err != nil {
+		op.log.Error(err, "Failed to write restore-failed sentinel")
+	}
 }
 
 // applyRestoredCondition uses server-side apply against the status subresource.
