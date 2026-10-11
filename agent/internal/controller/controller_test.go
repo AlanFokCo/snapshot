@@ -1782,6 +1782,33 @@ func TestRunRestoreFailureMarksUnresolvedContainerThroughHostPath(t *testing.T) 
 	assert.Equal(t, []string{"restore-pod-uid/main/" + podcontract.RestoreFailedFile}, written)
 }
 
+func TestRestorePod(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+
+	for name, tc := range map[string]struct {
+		namespace, name string
+		uid             ktypes.UID
+		found           bool
+	}{
+		"this cluster's Pod":          {namespace: "inference", name: "restore-worker", uid: "restore-pod-uid", found: true},
+		"same name, another UID":      {namespace: "inference", name: "restore-worker", uid: "other-uid"},
+		"no such Pod in this cluster": {namespace: "tenant", name: "restore-worker", uid: "restore-pod-uid"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := w.RestorePod(context.Background(), tc.namespace, tc.name, tc.uid)
+
+			require.NoError(t, err)
+			if !tc.found {
+				assert.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, pod.Annotations, got.Annotations)
+		})
+	}
+}
+
 func TestRestoreDestinations(t *testing.T) {
 	t.Run("map annotation needs no API read", func(t *testing.T) {
 		pod := multiRestorePod()

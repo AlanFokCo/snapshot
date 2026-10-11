@@ -15,6 +15,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ktypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
@@ -24,6 +26,18 @@ type fakeResolver struct {
 	err          error
 	calls        int
 	pod          *corev1.Pod
+	// foreign makes RestorePod report that the cluster has no such Pod.
+	foreign   bool
+	lookupErr error
+	lookedUp  string
+}
+
+func (r *fakeResolver) RestorePod(_ context.Context, namespace, name string, uid ktypes.UID) (*corev1.Pod, error) {
+	r.lookedUp = namespace + "/" + name + "/" + string(uid)
+	if r.foreign || r.lookupErr != nil {
+		return nil, r.lookupErr
+	}
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name, UID: uid}}, nil
 }
 
 func (r *fakeResolver) RestoreDestinations(_ context.Context, pod *corev1.Pod) ([]string, error) {
@@ -95,27 +109,71 @@ func TestCreateContainerScope(t *testing.T) {
 	}
 }
 
-func TestCreateContainerPassesPodIdentityToResolver(t *testing.T) {
-	annotations := map[string]string{
-		podcontract.RestoreFromAnnotation:         "snapshot-a",
-		podcontract.RestoreContainerMapAnnotation: "main=engine-0",
-	}
-	resolver := &fakeResolver{destinations: []string{"engine-0"}}
-	p, _ := testPlugin(t, resolver)
+func TestCreateContainerLooksUpThePodInItsOwnCluster(t *testing.T) {
+	restoreFrom := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
 
-	_, _, err := p.CreateContainer(context.Background(), restoreSandbox(annotations), &api.Container{Name: "engine-0"})
+	t.Run("plain cluster", func(t *testing.T) {
+		resolver := &fakeResolver{destinations: []string{"main"}}
+		p, _ := testPlugin(t, resolver)
+
+		_, _, err := p.CreateContainer(context.Background(), restoreSandbox(restoreFrom), &api.Container{Name: "main"})
+
+		require.NoError(t, err)
+		assert.Equal(t, "inference/restore-worker/pod-uid", resolver.lookedUp)
+		assert.Equal(t, "restore-worker", resolver.pod.Name, "destinations come from the API Pod")
+	})
+
+	t.Run("vCluster", func(t *testing.T) {
+		resolver := &fakeResolver{destinations: []string{"main"}}
+		p, root := testPlugin(t, resolver)
+		sandbox := &api.PodSandbox{
+			Name: "restore-worker-x-inference-x-tenant", Namespace: "tenant", Uid: "host-uid",
+			Annotations: map[string]string{
+				podcontract.RestoreFromAnnotation: "snapshot-a",
+				vclusterNamespaceAnnotation:       "inference",
+				vclusterNameAnnotation:            "restore-worker",
+				vclusterUIDAnnotation:             "pod-uid",
+			},
+		}
+
+		adjust, _, err := p.CreateContainer(context.Background(), sandbox, &api.Container{Name: "main"})
+
+		require.NoError(t, err)
+		require.NotNil(t, adjust)
+		assert.Equal(t, "inference/restore-worker/pod-uid", resolver.lookedUp)
+		assert.FileExists(t, filepath.Join(root, "host-uid", "main", podcontract.RestoreProxyBinaryName),
+			"kubelet's directories use the host Pod's UID")
+	})
+}
+
+// A node can run Pods of other clusters, for example other vCluster tenants.
+// Their restore Pods belong to their own Snapshot install, if any.
+func TestCreateContainerLeavesOtherClustersPodsAlone(t *testing.T) {
+	resolver := &fakeResolver{foreign: true, err: errors.New("must not be called")}
+	p, root := testPlugin(t, resolver)
+
+	adjust, _, err := p.CreateContainer(context.Background(),
+		restoreSandbox(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}), &api.Container{Name: "main"})
 
 	require.NoError(t, err)
-	assert.Equal(t, "restore-worker", resolver.pod.Name)
-	assert.Equal(t, "inference", resolver.pod.Namespace)
-	assert.Equal(t, "pod-uid", string(resolver.pod.UID))
-	assert.Equal(t, annotations, resolver.pod.Annotations)
+	assert.Nil(t, adjust)
+	assert.Zero(t, resolver.calls)
+	assert.NoDirExists(t, filepath.Join(root, "pod-uid"))
 }
 
 // Failing creation makes kubelet retry. Letting the container start would run
 // the image's own command in a container the agent is about to restore into.
 func TestCreateContainerFailsClosed(t *testing.T) {
 	restoreFrom := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
+
+	t.Run("Pod lookup fails", func(t *testing.T) {
+		p, _ := testPlugin(t, &fakeResolver{lookupErr: errors.New("API server unavailable")})
+
+		adjust, _, err := p.CreateContainer(context.Background(), restoreSandbox(restoreFrom), &api.Container{Name: "main"})
+
+		require.Error(t, err)
+		assert.Nil(t, adjust)
+	})
 
 	t.Run("destination lookup fails", func(t *testing.T) {
 		p, _ := testPlugin(t, &fakeResolver{err: errors.New("PodSnapshot not found")})
