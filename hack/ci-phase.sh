@@ -34,17 +34,26 @@ seconds=$(($(date +%s) - start))
 # Absent rather than zero when there is no image, so the renderer can tell a
 # phase that moved nothing from one whose size could not be read.
 #
-# Summed from the registry manifest rather than read from the Docker daemon,
-# because images are pushed and never loaded there. This is compressed
-# transfer size, which is the number that matters here: it is what crossed the
-# wire to the registry and will cross it again to the node.
+# Read from the registry rather than the Docker daemon, because images are
+# pushed and never loaded there. The sum is of layer blobs only: a reference
+# can resolve to an index, whose descriptor sizes are the manifests rather
+# than the content, and a manifest also carries a config blob that is not a
+# layer. Counting either would report a number that means nothing.
 bytes=""
 if [ -n "$image" ]; then
-    bytes=$(
-        docker buildx imagetools inspect "$image" --raw 2>/dev/null |
-            tr ',' '\n' | sed -n 's/.*"size"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' |
-            awk '{total += $1} END {if (total) print total}'
-    ) || bytes=""
+    raw=$(docker buildx imagetools inspect "$image" --raw 2>/dev/null) || raw=""
+    # An index has to be resolved to the one platform this job builds before
+    # there are any layers to add up.
+    digest=$(printf '%s' "$raw" | jq -r '
+        [.manifests[]? | select(.platform.os == "linux"
+                                and .platform.architecture == "amd64")][0].digest // empty
+    ' 2>/dev/null) || digest=""
+    if [ -n "$digest" ]; then
+        raw=$(docker buildx imagetools inspect "${image}@${digest}" --raw 2>/dev/null) || raw=""
+    fi
+    bytes=$(printf '%s' "$raw" | jq -r '
+        [.layers[]?.size] | if length > 0 then add else empty end
+    ' 2>/dev/null) || bytes=""
 fi
 
 printf '%s\t%s\t%s\n' "$label" "$seconds" "$bytes" >>"$CI_PHASE_LOG"

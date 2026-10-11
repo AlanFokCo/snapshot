@@ -97,6 +97,23 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
     make "docker-build-${component}" REGISTRY="${IMAGE_REGISTRY}" TAGS="${IMAGE_TAG}" \
       DOCKER_BUILD_ARGS="--push"
   done
+else
+  # Skipping the builds means relying on what a previous run pushed, and the
+  # registry only survives that run if it kept the cluster. Say so here rather
+  # than let the pods fail to pull ten minutes later.
+  missing=()
+  for component in operator agent pagebroker; do
+    curl -fsS "http://${IMAGE_REGISTRY}/v2/${component}/manifests/${IMAGE_TAG}" \
+      -H 'Accept: application/vnd.oci.image.index.v1+json' \
+      -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+      -o /dev/null 2>/dev/null || missing+=("${component}:${IMAGE_TAG}")
+  done
+  if ((${#missing[@]})); then
+    echo "SNAPSHOT_E2E_SKIP_BUILD is set but ${IMAGE_REGISTRY} has no ${missing[*]}." >&2
+    echo "Run once without it, with SNAPSHOT_E2E_KEEP_CLUSTER=true so the registry survives." >&2
+    exit 1
+  fi
+  log "reusing images already in ${IMAGE_REGISTRY}"
 fi
 
 hack/k3d-cpu-e2e.sh cluster-up

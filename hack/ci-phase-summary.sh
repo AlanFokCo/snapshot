@@ -29,7 +29,7 @@ echo
 echo "Cache: ${cache_state}. Percentages are of the instrumented phases below,"
 echo "not of the job's wall time."
 echo
-echo "| Phase | Duration | Pushed (compressed) |"
+echo "| Phase | Duration | Image layers (compressed) |"
 echo "| --- | ---: | ---: |"
 
 awk -F'\t' '

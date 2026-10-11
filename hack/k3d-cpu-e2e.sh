@@ -102,15 +102,23 @@ require_tools() {
   fi
 }
 
+# Idempotent, and deliberately not destructive: the images already in a
+# registry are the whole point of SNAPSHOT_E2E_SKIP_BUILD, and recreating it
+# empty would leave that run with nothing to pull. Tags are overwritten by the
+# next push, so a surviving registry is a cache rather than stale state.
 registry_up() {
   require_tools docker k3d
-  if k3d registry list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${REGISTRY_HOST}"; then
-    log "deleting leftover registry ${REGISTRY_HOST}"
-    k3d registry delete "${REGISTRY_HOST}"
+  if registry_exists; then
+    log "reusing registry ${REGISTRY_HOST} on localhost:${REGISTRY_PORT}"
+    return
   fi
 
   log "creating registry ${REGISTRY_HOST} on localhost:${REGISTRY_PORT}"
   k3d registry create "${REGISTRY_NAME}" --port "${REGISTRY_PORT}"
+}
+
+registry_exists() {
+  k3d registry list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${REGISTRY_HOST}"
 }
 
 registry_down() {
@@ -143,7 +151,7 @@ create_cluster() {
   # Expanded below as ${registry_args[@]+...}, because bash 3.2 -- still what
   # macOS ships -- treats an empty "${array[@]}" under `set -u` as unbound.
   local registry_args=()
-  if k3d registry list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${REGISTRY_HOST}"; then
+  if registry_exists; then
     local config
     config="$(mktemp)"
     registry_mirror_config >"${config}"

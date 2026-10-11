@@ -102,15 +102,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Free disk space
-        run: |
-          set -euo pipefail
-          # The agent image carries a CUDA base, and a full runner disk shows up
-          # as an obscure build failure rather than as "out of space".
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL || true
-          df -h /
-
       # k3d is needed before the builds, not just before the cluster: the
       # registry they push to is one it creates.
       - name: Install k3d
@@ -166,21 +157,6 @@ jobs:
               --cache-from=type=registry,ref=${CACHE_REF_PREFIX}:operator${CACHE_SCOPE_SUFFIX}"
           hack/ci-phase.sh "Build operator image" "${start}" \
             "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}"
-
-      # Pulled here rather than left to the build, which is the only reason
-      # this step exists. verify-base-packages runs dpkg-query in this image
-      # through `docker run`, so the agent build has always paid for a full
-      # pull of a CUDA base into the daemon before buildx starts — a cost the
-      # layer cache cannot avoid and that the build's own duration hides.
-      # Issue 505 cannot be answered without knowing how large that cost is.
-      - name: Pull the agent base image
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          base="$(make -s print-agent-base-image)"
-          start=$(date +%s)
-          docker pull --platform linux/amd64 --quiet "${base}"
-          hack/ci-phase.sh "Pull agent base image" "${start}" "${base}"
 
       - name: Build agent image
         timeout-minutes: 50
@@ -350,6 +326,13 @@ jobs:
             state="cold (scope suffix \`${CACHE_SCOPE_SUFFIX}\`)"
           fi
           hack/ci-phase-summary.sh "${state}" >>"${GITHUB_STEP_SUMMARY}"
+          # This job used to delete ~25 GB of preinstalled SDKs before it
+          # started, from when every image was unpacked into the Docker daemon
+          # and then copied into the node again. Nothing is loaded into the
+          # daemon now. Reported rather than assumed, so the headroom is on the
+          # record and a future squeeze is diagnosable rather than mysterious.
+          printf '\n**Disk** %s\n' "$(df -h --output=avail,pcent / | tail -1 | tr -s ' ')" \
+            >>"${GITHUB_STEP_SUMMARY}"
 
       - name: Collect diagnostics
         if: ${{ failure() }}
