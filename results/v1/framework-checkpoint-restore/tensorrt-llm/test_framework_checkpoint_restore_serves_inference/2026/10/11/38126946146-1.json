@@ -1,0 +1,186 @@
+{
+  "benchmarkVersion": 1,
+  "environment": {
+    "datadogGpuMonitoringMode": "disable",
+    "frameworkImage": "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073",
+    "frameworkImageDigest": "nvcr.io/nvidia/tensorrt-llm/release@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073",
+    "model": "Qwen/Qwen3-0.6B",
+    "modelCacheMode": "shared-nfs",
+    "namespace": "snapshot-e2e",
+    "restoreGpus": [],
+    "sourceGpus": [
+      {
+        "driverVersion": "615.71.09",
+        "model": "NVIDIA A100-SXM4-80GB"
+      }
+    ],
+    "sourceNodeGpuProduct": "NVIDIA-A100-SXM4-80GB",
+    "storage": {
+      "accessModes": [
+        "ReadWriteMany"
+      ],
+      "capacity": "64Gi",
+      "parameters": {
+        "skuName": "Standard_LRS"
+      },
+      "provisioner": "file.csi.azure.com",
+      "requestedSize": "64Gi",
+      "storageClass": "azurefile-csi",
+      "type": "Standard_LRS",
+      "volumeMode": "Filesystem"
+    },
+    "storageClass": "azurefile-csi"
+  },
+  "error": {
+    "message": "AssertionError: podsnapshots/test-framework-checkpoin-de23d9-snapshot failed: {'lastTransitionTime': '2026-10-11T09:12:25Z', 'message': 'checkpoint: prepare PageBroker checkpoint: PageBroker GPU execution requires SO_PEERPIDFD: protocol not available', 'reason': 'CheckpointFailed', 'status': 'True', 'type': 'Failed'}",
+    "phase": "call"
+  },
+  "events": [
+    {
+      "name": "test.started",
+      "offsetSeconds": 0.0,
+      "timestamp": "2026-10-11T09:09:39.227Z"
+    },
+    {
+      "name": "source.ready",
+      "offsetSeconds": 161.217517,
+      "timestamp": "2026-10-11T09:12:20.444Z"
+    },
+    {
+      "name": "checkpoint.requested",
+      "offsetSeconds": 165.943502,
+      "timestamp": "2026-10-11T09:12:25.170Z"
+    },
+    {
+      "name": "test.finished",
+      "offsetSeconds": 166.656813,
+      "timestamp": "2026-10-11T09:12:25.883Z"
+    }
+  ],
+  "finishedAt": "2026-10-11T09:12:25.883Z",
+  "identity": {
+    "case": "tensorrt-llm",
+    "runAttempt": 1,
+    "runId": "38126946146",
+    "suite": "framework-checkpoint-restore",
+    "test": "test_framework_checkpoint_restore_serves_inference"
+  },
+  "measurements": [
+    {
+      "displayName": "Full E2E test",
+      "endEvent": "test.finished",
+      "name": "test.total.duration",
+      "startEvent": "test.started",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 166.656813
+    },
+    {
+      "displayName": "Checkpoint (API to Ready)",
+      "missingReason": "end event not reached",
+      "name": "checkpoint.duration",
+      "startEvent": "checkpoint.requested",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Restore requested to traffic ready",
+      "missingReason": "start event not reached",
+      "name": "restore.to_traffic.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Restore pod create to traffic",
+      "missingReason": "start event not reached",
+      "name": "restore.pod_create_to_traffic.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Checkpoint (agent)",
+      "missingReason": "start event not reached",
+      "name": "checkpoint.agent.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Checkpoint CRIU dump",
+      "missingReason": "start event not reached",
+      "name": "checkpoint.criu_dump.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Restore (agent)",
+      "missingReason": "start event not reached",
+      "name": "restore.agent.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Restore CRIU restore",
+      "missingReason": "start event not reached",
+      "name": "restore.criu_restore.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Agent restore complete to traffic ready",
+      "missingReason": "start event not reached",
+      "name": "restore.agent_complete_to_traffic.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Source image pull",
+      "missingReason": "start event not reached",
+      "name": "source.image_pull.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Source image pull including wait",
+      "missingReason": "start event not reached",
+      "name": "source.image_pull_including_wait.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Restore image pull",
+      "missingReason": "start event not reached",
+      "name": "restore.image_pull.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Restore image pull including wait",
+      "missingReason": "start event not reached",
+      "name": "restore.image_pull_including_wait.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    }
+  ],
+  "outcome": "failed",
+  "schemaVersion": 1,
+  "source": {
+    "commit": "f4a5720d87d97ea810041fdb5ad5c3470d122a29",
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/38126946146",
+    "snapshotTag": "v0.0.0-gf4a5720d"
+  },
+  "startedAt": "2026-10-11T09:09:39.227Z"
+}
