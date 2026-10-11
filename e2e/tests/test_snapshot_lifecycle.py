@@ -754,8 +754,7 @@ def test_orphan_sweep_reclaims_uid_root(
     try:
         _, source_node = create_ready_source(config, run, gpu=False)
         orphan_uid = f"e2e-orphan-{run.suffix}"
-        snap.create_artifact_staging_file(config, source_node, orphan_uid)
-        assert snap.artifact_root_exists(config, source_node, orphan_uid)
+        assert snap.create_artifact_staging_file(config, source_node, orphan_uid)
         snap.wait_for_artifact_root_absent(
             config, source_node, orphan_uid, timeout=60
         )

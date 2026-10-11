@@ -942,14 +942,23 @@ def create_artifact_staging_file(
     config: k8s.E2EConfig,
     node: str,
     content_uid: str,
-) -> None:
-    k8s.exec_command(
+) -> bool:
+    """Creates an orphan root and reports whether it exists, in one exec.
+
+    The sweep runs every few seconds in e2e installs and reclaims a root with no
+    content behind it on sight, so a separate exec to look for it would race
+    the sweeper.
+    """
+    marker = "__snapshot_artifact_root_created__"
+    root = checkpoint_artifact_root(content_uid)
+    output = k8s.exec_command(
         config.namespace,
         checkpoint_agent_pod(config, node),
-        f"mkdir -p {checkpoint_artifact_root(content_uid)}/.tmp && "
-        f"printf orphan > {checkpoint_artifact_root(content_uid)}/.tmp/partial",
+        f"mkdir -p {root}/.tmp && printf orphan > {root}/.tmp/partial && "
+        f"test -d {root} && printf '%s' {marker}",
         container=AGENT_CONTAINER,
     )
+    return output == marker
 
 
 def host_monitoring_agents(config: k8s.E2EConfig, node: str) -> str:
