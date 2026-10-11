@@ -14,12 +14,11 @@ SPDX-License-Identifier: Apache-2.0
   - [User Stories](#user-stories)
     - [Story 1: a concurrent capture is holding the node's staging memory](#story-1-a-concurrent-capture-is-holding-the-nodes-staging-memory)
     - [Story 2: the dump fails after the workload is already suspended](#story-2-the-dump-fails-after-the-workload-is-already-suspended)
-    - [Story 3: the store fails after a good dump](#story-3-the-store-fails-after-a-good-dump)
-    - [Story 4: the workload is too large to capture on this node](#story-4-the-workload-is-too-large-to-capture-on-this-node)
+    - [Story 3: the workload is too large to capture on this node](#story-3-the-workload-is-too-large-to-capture-on-this-node)
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
 - [Design Details](#design-details)
-  - [Keeping the source alive](#keeping-the-source-alive)
-  - [Probing the workload](#probing-the-workload)
+  - [Deciding what to repeat](#deciding-what-to-repeat)
+  - [When a suspended workload is still dumpable](#when-a-suspended-workload-is-still-dumpable)
   - [Reviving a suspended workload](#reviving-a-suspended-workload)
   - [Attempt lifecycle](#attempt-lifecycle)
   - [Failures that end the capture immediately](#failures-that-end-the-capture-immediately)
@@ -39,13 +38,12 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Summary
 
-A checkpoint capture that fails for a transient reason is retried against the
-workload that produced it, instead of being thrown away. The workload is kept
-alive until its checkpoint is safely stored, so a retry resumes from the
-furthest point that is still valid rather than starting over, and no model is
-reloaded to recover a capture. How many times to retry is configurable
-cluster-wide and per capture. Failures a retry cannot fix end the capture
-immediately, with a reason naming the cause.
+A checkpoint capture that fails for a transient reason is retried in place,
+against the workload that is already running, instead of being thrown away.
+Each failure is recovered by the cheapest means that can resolve it, so a retry
+repeats only the work that is no longer valid and never reloads a model. How
+many times to retry is configurable cluster-wide and per capture. Failures a
+retry cannot fix end the capture immediately, with a reason naming the cause.
 
 ## Motivation
 
@@ -79,8 +77,8 @@ of #319.
 
 1. A capture that fails for a transient cause succeeds on a subsequent attempt
    without manual intervention, against the workload that is already running.
-2. A retry resumes from the furthest valid point rather than repeating work
-   that is still good.
+2. A retry repeats only work that is no longer valid, decided from the observed
+   state of the workload.
 3. A capture that cannot be recovered fails immediately, keeping its retries,
    and says why.
 4. Retry limits are configurable, with a cluster-wide default an individual
@@ -98,48 +96,46 @@ of #319.
 1. **Restarting the source pod.** No second source Job, `PodSnapshot`, or
    `PodSnapshotContent` is created. Every recovery acts on the pod already named
    by `PodSnapshotContent.spec.source.podRef`.
-2. **Surviving a node-agent restart.** An attempt in flight when the agent dies
+2. **Keeping the source alive past a successful dump.** The dump still
+   terminates the workload, so a capture whose data is lost after the dump
+   succeeded is not recoverable.
+3. **Surviving a node-agent restart.** An attempt in flight when the agent dies
    is not resumed; the work order fails through the existing content resync and
    capture-lease expiry. Keeping the agent alive is goal 6; resuming across its
    death is not.
-3. **Telling the workload that no checkpoint is coming.** The other half of
+4. **Telling the workload that no checkpoint is coming.** The other half of
    #319. It changes the workload contract rather than the agent's capture path.
-4. **Restore-path retry or cold-start fallback** (#247, #244). Setting names are
+5. **Moving publish retry into PageBroker.** The agent owns the retry; the
+   broker's contract is unchanged.
+6. **Restore-path retry or cold-start fallback** (#247, #244). Setting names are
    aligned with #247 so the two read as a pair, but the mechanisms are separate.
 
 ## Proposal
 
 A capture runs four steps: **stage** a destination, **suspend** the workload's
-GPU state, **dump** the process, and **store** the result. Today any failure
-ends the capture and kills the workload, discarding every step that succeeded.
+GPU state, **dump** the process, and **store** the result. The dump terminates
+the workload by design, so what a failure leaves behind depends entirely on
+where it happened.
 
-This proposal changes two things.
+When an attempt fails, the agent reads the workload's actual state and takes
+the cheapest recovery that fits:
 
-**The workload is kept alive until the checkpoint is stored.** Today the dump
-terminates it, so a failure to store leaves nothing to recapture. Keeping it
-until the artifact is durable means a failed store is recoverable rather than
-fatal.
-
-**A retry resumes from the furthest valid point.** The agent reads what state
-the workload and the staged data are actually in, and restarts from there:
-
-| What the agent finds | Resumes from |
+| Workload state | Recovery |
 | --- | --- |
-| Workload running, nothing staged | stage |
-| Workload suspended and still dumpable | dump |
-| Workload suspended but not dumpable | revive it, then suspend |
-| Checkpoint staged, store failed, staging intact | store |
-| Checkpoint staged, store failed, staging gone | dump |
-| Workload gone | capture fails |
+| Running, untouched | discard the attempt and start another |
+| Suspended, still dumpable | dump again, keeping the GPU state as it is |
+| Suspended, not dumpable | revive it, then suspend and dump again |
+| Terminated, checkpoint staged | store again; no live workload is needed |
+| Terminated, nothing staged | the capture fails |
 
-Resuming matters because suspending a workload's GPU state is by far the
-expensive step, and a failed dump leaves that work done and still valid.
-Repeating it would be the single largest avoidable cost in a retry.
+The second row is the one that matters most. Suspending a workload's GPU state
+is by far the expensive step, and a failed dump leaves that work done and still
+valid — so the common case repeats only the dump. Reviving is the fallback for
+when it is not.
 
-Anything that cannot be resumed ends the capture immediately with a reason
-naming the cause. Retries continue while the configured limit allows, and a
-capture that uses up its retries reports that distinctly from one that failed
-on the first try.
+Anything else ends the capture immediately with a reason naming the cause.
+Retries continue while the configured limit allows, and a capture that uses up
+its retries reports that distinctly from one that failed on the first try.
 
 ### User Stories
 
@@ -161,20 +157,10 @@ The same capture gets further on a later run: the GPU state has been moved to
 host memory and the dump then fails.
 
 Today the workload is killed and the model is gone. With this proposal the
-agent finds it alive and suspended, confirms it is still dumpable, and dumps
-again — skipping the expensive suspend entirely.
+agent finds it alive and still dumpable and dumps again, skipping the expensive
+suspend entirely.
 
-#### Story 3: the store fails after a good dump
-
-A capture completes its dump and the write to the checkpoint store fails on a
-transient error. The checkpoint data is intact; only its publication failed.
-
-Today the capture is lost despite the expensive part having worked, and the
-workload it came from no longer exists to repeat it. With this proposal the
-workload is still alive, so the agent retries the store — and if the staged
-data has expired, dumps again rather than giving up.
-
-#### Story 4: the workload is too large to capture on this node
+#### Story 3: the workload is too large to capture on this node
 
 A workload's checkpoint image is bigger than the node can stage. No amount of
 waiting helps: there is no moment at which it fits.
@@ -186,17 +172,6 @@ else.
 
 ### Limitations, Risks, and Mitigations
 
-**Keeping the workload alive holds its GPUs for longer.** The source now
-survives until the artifact is stored, rather than dying with the dump. The
-window is the store itself, not the capture. Accepted as the cost of making a
-failed store recoverable.
-
-**The workload can run past the point captured.** Because it is no longer
-killed by the dump, it may execute between the dump and its release, including
-externally visible work. Mitigated by releasing it as soon as the artifact is
-durable, so the window is the store rather than the capture. Operators who need
-the old semantics get them by setting the retry limit to zero.
-
 **Reviving a suspended workload narrows a documented invariant.** The capture
 path states today that a CUDA-locked source is never resumed. This narrows it
 to: never resumed unless the agent has verified it can be. The danger is a
@@ -205,12 +180,18 @@ therefore reads each GPU process's state rather than inferring it, before and
 after, and ends the capture if any of them does not return to running — the
 current outcome, rather than a corrupt artifact.
 
-**CRIU's failure-path behaviour is not a stable contract.** Resuming after a
-failed dump depends on CRIU leaving the task tree alive. This was measured and
-holds (see [Test Plan](#test-plan)), but the agent builds CRIU from a moving
-upstream branch, so it could change with no version change in this repository.
-The same state check mitigates it: a tree the agent cannot account for ends the
-capture, so a CRIU regression degrades retry rather than breaking capture.
+**CRIU's failure-path behaviour is not a stable contract.** Dumping again after
+a failed dump depends on CRIU leaving the task tree alive and releasing it.
+This was measured and holds (see [Test Plan](#test-plan)), but the agent builds
+CRIU from a moving upstream branch, so it could change with no version change
+in this repository. The dumpability check mitigates it: a tree that does not
+present as cleanly suspended is revived or fails, so a CRIU regression degrades
+retry rather than breaking capture.
+
+**Retry extends how long a workload holds its GPUs.** A capture that retries
+occupies the source pod, its GPUs, and node staging for longer than one that
+fails immediately. Bounded by the configured retry limit and by the capture
+timeout, as described under [Attempt lifecycle](#attempt-lifecycle).
 
 **Every attempt targets one destination.** Retrying in place means a new
 attempt cannot stage until the previous one has fully released, or it conflicts
@@ -223,30 +204,54 @@ Retry lives entirely within the node agent, inside the handling of one
 `PodSnapshotContent`, under the in-flight guard and capture lease the agent
 already holds. No controller above the agent participates.
 
-### Keeping the source alive
-
-The dump currently runs with `LeaveRunning: false`, so a successful dump
-terminates the workload. It is changed to leave the tree alive, and the agent
-releases the workload itself once the artifact is committed. Between dump and
-release the workload is alive with its GPU state still suspended: it makes no
-GPU progress, costs no extra memory beyond what it already holds, and is
-immediately available as a dump source if the store fails.
-
-This also removes a step that currently destroys the evidence a retry needs.
-Today the agent SIGKILLs the source within milliseconds of a dump failure, so
-nothing can observe what CRIU left behind. That kill is removed; the workload's
-fate is decided by the probe below.
-
-### Probing the workload
+### Deciding what to repeat
 
 The agent reads state rather than inferring it from how the attempt failed. Two
 inputs: **which step failed**, which it knows because it controls the sequence
-and which tells it whether staged data might exist; and **a probe** of
-process-tree liveness plus each GPU process's state from the existing
-`--get-state` helper action. The probe decides.
+and which tells it whether staged data might exist; and **a probe** of the
+workload. The probe decides.
 
-GPU processes report `running`, `locked`, `checkpointed`, or `failed`. A
-`failed` process, or one the probe cannot account for, ends the capture.
+The agent's kill of the source immediately after a dump failure is removed.
+Today it fires within milliseconds, destroying the state every recovery depends
+on; what happens to the workload is now the probe's decision.
+
+### When a suspended workload is still dumpable
+
+After the GPU suspend, the workload's GPU memory has moved to host memory and
+the process tree is otherwise untouched. A dump that fails from there can leave
+that tree in one of three conditions, and telling them apart is what decides
+between dumping again and reviving first.
+
+**Dumpable** means the tree presents exactly as it did after a clean suspend —
+nothing about the failed dump is still attached to it:
+
+| Signal | Required value | What it rules out |
+| --- | --- | --- |
+| Every recorded process present, thread count unchanged | as recorded at suspend | the tree changed: a process exited or forked after CRIU released it |
+| `TracerPid` | `0` | CRIU still has the process seized |
+| Task state | not `T` | the process is left stopped |
+| Task state | not `D` | the process is blocked in an uninterruptible driver call and cannot be seized reliably |
+| Every GPU process | `checkpointed` | the suspend itself did not complete |
+
+These are the signals because of how CRIU works: it seizes a tree by
+`ptrace`-attaching and injecting a parasite, so `TracerPid` and the task state
+are the direct evidence of whether it let go, and the thread count is the
+cheapest check that the tree is the one that was suspended. GPU state is read
+from the existing `--get-state` helper action.
+
+When all of them hold, the agent dumps again and touches nothing else. This is
+the expected case: CRIU cures its parasite and unseizes as part of failing, so
+a dump that failed cleanly leaves precisely this signature — measured, and
+indistinguishable from a workload that was only ever suspended.
+
+**Not dumpable, but recoverable** is any single deviation above. The GPU state
+may be mixed because the suspend failed partway; CRIU may still hold the
+process; the process may be blocked in the driver; or the tree may have moved
+on. None of these can be dumped as they stand, and all of them are fixed by
+reviving the workload and starting the suspend again.
+
+**Terminal** is a GPU process reporting `failed`, which is the driver saying
+the context is unrecoverable, or a recorded process that is gone.
 
 ### Reviving a suspended workload
 
@@ -271,10 +276,6 @@ restore-and-unlock helper cannot be reused: it restores every process and
 returns on the first error, so against a mixed tree it fails *and* leaves every
 process locked — worse than before the attempt (see [Test Plan](#test-plan)).
 
-Revival is only needed when a suspended workload is not dumpable as it stands.
-When it is, the agent dumps again directly, which is what makes resuming
-cheaper than restarting.
-
 ### Attempt lifecycle
 
 Each attempt is a self-contained function invoked from a loop, so an attempt's
@@ -282,10 +283,10 @@ cleanup completes at the end of *that attempt* rather than accumulating.
 
 Three properties are load-bearing:
 
-- **A retry that reuses staged data must not release it.** The deferred release
-  that runs on other failure paths would destroy the staged image that makes a
-  store retry possible, so release is conditional on where the retry resumes.
-- **A retry that re-stages must confirm release first.** The agent proceeds
+- **A store retry must not release its staged data.** The deferred release that
+  runs on other failure paths would destroy the only copy of a successful dump,
+  so release is conditional on which recovery was chosen.
+- **An attempt that re-stages must confirm release first.** The agent proceeds
   only once the previous transaction is terminal and its transfers have drained.
 - **The lease is re-checked between attempts.** A lost lease means another
   holder may own the work order; retrying under one ends the capture.
@@ -308,6 +309,8 @@ A probe that cannot account for the workload is the primary rule. Alongside it:
   node, and an in-place retry stays on this node.
 - **Destination store exhaustion**, and **an image too large for the node's
   staging** ([Protecting the node agent](#protecting-the-node-agent)).
+- **Staged data lost after a successful dump** — the workload is already gone,
+  so there is nothing to dump again.
 - **Broker rejections a retry cannot change** — a malformed request or a
   destination conflict.
 
@@ -382,9 +385,8 @@ already takes: a caller creating a `PodSnapshot` sets it directly; `SnapshotJob`
 exposes it on `spec.podSnapshotTemplate` alongside `targetContainers` and copies
 it into the `PodSnapshot` it creates; and the `PodSnapshotReconciler` copies it
 into `PodSnapshotContent.spec`, where the agent already reads the work order.
-Both specs stay immutable, since the value is set at creation.
-
-An out-of-range value is rejected by CRD validation at admission.
+Both specs stay immutable, since the value is set at creation. An out-of-range
+value is rejected by CRD validation at admission.
 
 One choice for review: whether an operator should be able to cap what a caller
 may request.
@@ -406,10 +408,10 @@ Two smaller considerations:
   classification produce diagnostics that could include internal paths or stack
   traces. Conditions and events carry a bounded message; full traces stay in
   agent logs, which are already operator-scoped.
-- **Resource holding, and who may extend it.** A caller can lengthen its own
-  hold on shared GPUs and staging, both by retrying and by keeping its workload
-  alive through the store. Whether operators should be able to cap that is the
-  open question in [API](#api).
+- **Resource holding, and who may extend it.** Because the retry limit is
+  settable per capture, a caller can lengthen its own hold on shared GPUs and
+  staging. Whether operators should be able to cap that is the open question in
+  [API](#api).
 
 ### Configuration
 
@@ -422,27 +424,25 @@ retries, absent means it expressed no preference. The effective limit is
 resolved once when the capture begins and logged with it.
 
 The cluster default is **0**, so retry is opt-in and an upgrade changes no
-existing capture's behaviour — including the point at which the workload is
-released, which at zero retries is indistinguishable from today. This matches
-the default #247 states for restore retry, and the setting's name should be
-agreed with it.
+existing capture's behaviour. This matches the default #247 states for restore
+retry, and the setting's name should be agreed with it.
 
 The node-agent protections are independent of this default: panic recovery and
 the fail-fast size check are unconditional.
 
 ### Performance and Scalability
 
-A successful capture is unaffected except for the store window, during which
-the workload is held rather than already dead.
+A successful capture is unaffected: the probe and the recovery decision run
+only after a failure.
 
 A failing capture becomes slower by design, and its workload and GPUs stay
 occupied for that duration — the explicit trade against re-reaching a ready
 workload from scratch.
 
-Resuming is what keeps a retry cheap. Suspending and reviving GPU state each
-move the workload's full GPU footprint across the PCIe bus, so a retry that
-resumes at the dump avoids roughly twice that transfer. The cost therefore
-scales with the workload's GPU footprint, not with the number of retries.
+Dumping again without reviving is what keeps the common retry cheap. Suspending
+and reviving GPU state each move the workload's full GPU footprint across the
+PCIe bus, so avoiding both saves roughly twice that transfer. The saving scales
+with the workload's GPU footprint, not with the number of retries.
 
 Node memory is the scarce resource. Staging is memory-backed and shared by both
 containers in the agent pod, so a retry that failed to release its
@@ -451,8 +451,8 @@ and the size check keeps a capture that cannot fit from being attempted.
 
 ### Monitoring
 
-- **Events** on the source pod for each failed attempt, naming where the retry
-  resumed and the cause.
+- **Events** on the source pod for each failed attempt, naming the recovery
+  taken and the cause.
 - **A distinct terminal reason for exhausting the retry limit**, so "failed
   after exhausting its retries" reads differently from "failed once".
 - **Distinct reasons separating storage conditions**: staging refused under
@@ -470,9 +470,9 @@ operators ask for it.
 ### Dependencies
 
 In the tree already: the GPU checkpoint and restore helper actions used for
-suspend and revival; a CRIU version query; process-tree enumeration for the
-probe; the pod-event mechanism; the injection seam used to simulate capture
-failures in tests; and the artifact cleanup machinery (#349, #390).
+suspend, probing, and revival; a CRIU version query; process-tree enumeration;
+the pod-event mechanism; the injection seam used to simulate capture failures
+in tests; and the artifact cleanup machinery (#349, #390).
 
 One qualification: **typed PageBroker failure codes.** Classifying broker
 failures by code rather than text needs an accessor on the client's failure
@@ -484,12 +484,13 @@ This proposal assumes the PageBroker data path (#251).
 
 ### Test Plan
 
-**Unit.** The resume decision is a pure function of failing step and probe
-result, table-tested across every combination. Immediate-failure classification
-is tested per reason. Retry bounds are tested for limit expiry and for correct
-reporting of exhaustion. Limit resolution is tested for precedence, for absent
-versus explicit zero, and for rejection of an invalid value. Release behaviour
-is tested for the property that a store retry retains its staged data and a
+**Unit.** The recovery decision is a pure function of failing step and probe
+result, table-tested across every combination, including each dumpability
+signal failing on its own. Immediate-failure classification is tested per
+reason. Retry bounds are tested for limit expiry and for correct reporting of
+exhaustion. Limit resolution is tested for precedence, for absent versus
+explicit zero, and for rejection of an invalid value. Release behaviour is
+tested for the property that a store retry retains its staged data and a
 re-stage does not proceed before confirmed release. Panic recovery is tested by
 panicking inside the existing capture injection seam and asserting the agent
 survives with the work order terminally failed.
@@ -510,32 +511,33 @@ kernels and return correct data rather than merely exist.
 | Question | Result |
 | --- | --- |
 | Does a failed dump leave the tree alive? | Yes — before and after the freeze. CRIU unfreezes and unseizes as part of failing. |
+| Does a failed dump leave anything attached? | No. Task state `S`, `TracerPid` 0, thread count unchanged, GPU state `checkpointed` — identical to a clean suspend. |
 | Does the agent kill the source after a failure? | Yes, within 12 ms — which is why that kill is removed. |
 | Can a suspended workload be revived? | Yes. Full cycle repeated with **0 checksum mismatches** and GPU memory retained. |
 | Can a revived workload be captured again? | Yes — it re-enters the suspend state machine cleanly. |
 | Does per-process dispatch matter? | Yes. Restoring a `locked` process returns `CUDA_ERROR_ILLEGAL_STATE`; the existing helper then returns before unlocking, leaving every process locked. |
 | Does a staging `sizeLimit` contain an oversized capture? | Yes. The dump failed with `ENOSPC` mid-write and the agent survived with 0 restarts. |
-| What does suspend/revive cost? | ~300 ms suspend, ~220 ms revive per 256 MiB — roughly 2 GB/s each way, so it scales with the workload's GPU footprint. |
+| What does suspend/revive cost? | ~300 ms suspend, ~220 ms revive per 256 MiB — roughly 2 GB/s each way. |
 
-**Not yet shown:** a successful capture *after* a revival through the
+**Not yet shown:** a successful capture *after* a failed dump through the
 production agent, which requires the kill above to be removed — the change this
 proposal makes. End-to-end coverage therefore closes with induced transient
-failures for each resume point against the framework workloads already used by
-the suite, asserting the capture succeeds on retry and that a retried capture
+failures for each recovery against the framework workloads already used by the
+suite, asserting the capture succeeds on retry and that a retried capture
 produces an artifact indistinguishable from a first-attempt one.
 
 ### Graduation Criteria
 
 **Alpha.** Retry is available, defaulting to zero retries, configurable
-cluster-wide and per capture, with unit and integration coverage for resume
-points that do not require reviving a suspended workload. The node-agent
+cluster-wide and per capture, with unit and integration coverage for the
+recoveries that do not require reviving a suspended workload. The node-agent
 protections are in place and unconditional. Failure classification distinguishes
 retryable from immediate causes, and storage conditions are reported distinctly.
 
-**Beta.** The source is kept alive until the artifact is stored, and revival is
-enabled. End-to-end coverage demonstrates each resume point against the
-framework workloads, including a capture that succeeds after a revival, and a
-retried capture is shown to restore correctly.
+**Beta.** Revival is implemented and enabled. End-to-end coverage demonstrates
+each recovery against the framework workloads, including a capture that
+succeeds after a failed dump, and a retried capture is shown to restore
+correctly.
 
 **GA.** Field evidence that the default configuration is right, that revival
 succeeds at a rate justifying its complexity, and that no capture has been
