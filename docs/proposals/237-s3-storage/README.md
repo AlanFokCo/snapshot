@@ -133,7 +133,7 @@ sequenceDiagram
     Agent->>PB: Commit
     PB->>S3: Upload payload objects
     PB->>S3: PUT index.json last under containers/name/
-    PB-->>Agent: PublishedArtifact (handle, format version)
+    PB-->>Agent: PublishedArtifact (store, handle)
     Agent->>API: Add descriptor to status.storage.artifacts, Ready when all containers confirmed
     alt Commit reply lost or PageBroker restarted
         Agent->>PB: Commit (same transaction)
@@ -226,7 +226,7 @@ this; the probe goes through PageBroker like every other agent access.
 
 | Risk | What goes wrong | How the design handles it |
 | --- | --- | --- |
-| Changed store | The installation is switched to another store, or back again. Content bound to the old store cannot be reached through the new one. If the old store is gone, its content can never be cleaned up. | The content keeps `storeID`, `artifactHandle` and format version; the bucket layout is keyed by content UID. Switching S3 → PVC → the same S3 configuration hashes to the same `storeID`, so old checkpoints restore again with no migration. Every operation refuses a mismatched binding before any I/O. While the original store is inactive, deletion cannot be confirmed: the content gets a `StoreInactive` condition and an event and keeps its finalizer; the sweep retries. An administrator can set the annotation `snapshot.nvidia.com/release-artifacts=true` to drop the finalizer; the artifacts left behind are recorded in an event. |
+| Changed store | The installation is switched to another store, or back again. Content bound to the old store cannot be reached through the new one. If the old store is gone, its content can never be cleaned up. | The content keeps `storeID` and `artifactHandle`; the bucket layout is keyed by content UID. Switching S3 → PVC → the same S3 configuration hashes to the same `storeID`, so old checkpoints restore again with no migration. Every operation refuses a mismatched binding before any I/O. While the original store is inactive, deletion cannot be confirmed: the content gets a `StoreInactive` condition and an event and keeps its finalizer; the sweep retries. An administrator can set the annotation `snapshot.nvidia.com/release-artifacts=true` to drop the finalizer; the artifacts left behind are recorded in an event. |
 | Credentials or S3 outage | The key is revoked or the store is unreachable during a checkpoint, a restore or a cleanup. | Check destination access before capture and source access before restore. Bound retries and timeouts. Preflight cannot guarantee later access, so every operation handles denial mid-way. Access denial never proves that an artifact is missing, so it never triggers deletion. |
 | Uncertain publication | PageBroker uploaded the checkpoint but the `Commit` reply to the agent was lost, or one side restarted. Nobody knows whether the publication exists. | The publication has one fixed path per content and container. A retried `Commit` checks that path and is a no-op if a matching index is already there. Uploads resume only from complete staging; CUDA/CRIU are never replayed. If the agent itself is lost before status is written, it probes the same fixed path through PageBroker on restart and finishes or fails the capture from what it finds. |
 | Cleanup races | On S3, deleting an artifact while a restore is still downloading it fails the restore, and an upload that lands after cleanup leaves an orphan. On PVC neither happens: an unlinked file stays readable to a process that has it open. | Deletion is immediate on both backends, as today. A restore interrupted by deletion fails and reports it; the content was deleted under it. A publication that lands after cleanup is an orphan the next sweep removes. Stage 2 adds explicit active-operation tracking so cleanup can wait for in-flight operations. |
@@ -250,7 +250,6 @@ status:
     artifacts:                           # One descriptor per captured container
       - containerName: main              # Associate the publication with its container
         artifactHandle: <opaque-handle>   # Locate the publication inside its bound store
-        artifactFormatVersion: snapshot.pagebroker/v1  # Layout of the publication in the store, not the checkpoint format
 ```
 
 ```go
@@ -268,9 +267,8 @@ type CheckpointStorageStatus struct {
 }
 
 type PublishedContainerArtifact struct {
-    ContainerName         string `json:"containerName"`
-    ArtifactHandle        string `json:"artifactHandle"`
-    ArtifactFormatVersion string `json:"artifactFormatVersion"`
+    ContainerName  string `json:"containerName"`
+    ArtifactHandle string `json:"artifactHandle"`
 }
 ```
 
@@ -278,11 +276,11 @@ Both `spec.storage` and `status.storage` are optional pointers so legacy content
 without a binding stays valid. `artifactHandle` is where PageBroker put the
 publication inside the store: a directory on PVC, the index object key on S3. The
 agent stores it and hands it back for restore and metadata reads, so restore never
-reconstructs the path from naming conventions and the layout can change per format
-version without an API change. `artifactFormatVersion` versions how PageBroker laid
-the bundle out in the store (a directory on PVC, an index plus data objects on S3);
-PageBroker selects its reader by backend and this value. CRIU and CUDA formats are
-unchanged and are validated by the existing compatibility checks.
+reconstructs the path from naming conventions and the layout can change without an
+API change. The layout version lives in the index itself, not in the API: PageBroker
+selects its reader by backend and reads the version from the index before touching
+any data. CRIU and CUDA formats are unchanged and are validated by the existing
+compatibility checks.
 
 The operator sets `spec.storage.storeID` when it creates the `PodSnapshotContent`.
 The whole spec is immutable, so the binding can never be added or changed
@@ -426,7 +424,6 @@ message ArtifactTarget {
 message PublishedArtifact {
   string store_id = 1;                 // Require the original configured store.
   string artifact_handle = 2;          // Opaque locator within that store.
-  string artifact_format_version = 3;  // Backend reader version, not CRIU version.
 }
 
 message PrepareStagedCheckpointRequest {
@@ -629,8 +626,9 @@ struct; they come from the projected Secret files.
 Store the existing per-container bundle under
 `<store-prefix>/artifacts/<artifactUID>/containers/<name>/`; the store prefix includes
 the configured prefix and installation/store identifiers. Upload immutable payloads,
-then publish the index last. The index binds store/artifact/container and format
-version, and lists file/directory paths, permissions, sizes and file SHA-256 digests.
+then publish the index last. The index carries its own layout version, binds
+store/artifact/container, and lists file/directory paths, permissions, sizes and
+file SHA-256 digests.
 Reject unsafe paths, unsupported formats, missing files and checksum mismatches.
 
 The index lives at a fixed key, `containers/<name>/index.json`, so there is exactly
@@ -677,17 +675,15 @@ Example publication descriptors; digest values are placeholders:
 // PVC
 store_id: "store-v1-<pvc-digest>"
 artifact_handle: "artifacts/<artifactUID>/containers/main"
-artifact_format_version: "snapshot.pagebroker/v1"
 ```
 
 ```protobuf
 // S3
 store_id: "store-v1-<s3-digest>"
 artifact_handle: "artifacts/<artifactUID>/containers/main/index.json"
-artifact_format_version: "snapshot.pagebroker/v1"
 ```
 
-Reader selection uses **backend + version**. PVC keeps its directory representation;
+Reader selection uses the **backend and the version in the index**. PVC keeps its directory representation;
 S3 reconstructs the same logical bundle from index-listed objects at
 `<publication>/data/<relative-file-path>`. CRIU/CUDA retain their producer formats.
 
