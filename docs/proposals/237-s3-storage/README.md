@@ -277,10 +277,11 @@ without a binding stays valid. `artifactHandle` is where PageBroker put the
 publication inside the store: a directory on PVC, the index object key on S3. The
 agent stores it and hands it back for restore and metadata reads, so restore never
 reconstructs the path from naming conventions and the layout can change without an
-API change. The layout version lives in the index itself, not in the API: PageBroker
-selects its reader by backend and reads the version from the index before touching
-any data. CRIU and CUDA formats are unchanged and are validated by the existing
-compatibility checks.
+API change. The layout version lives in the index itself, not in the API: for S3,
+PageBroker reads the version from the index before touching any data. PVC has no
+index: the backend alone selects the existing directory reader, so artifacts
+captured before this proposal restore unchanged. CRIU and CUDA formats are unchanged
+and are validated by the existing compatibility checks.
 
 The operator sets `spec.storage.storeID` when it creates the `PodSnapshotContent`.
 The whole spec is immutable, so the binding can never be added or changed
@@ -679,7 +680,8 @@ store_id: "store-v1-<s3-digest>"
 artifact_handle: "artifacts/<artifactUID>/containers/main/index.json"
 ```
 
-Reader selection uses the **backend and the version in the index**. PVC keeps its directory representation;
+Reader selection uses the **backend, plus the index version on S3**. PVC keeps its
+directory representation and its existing reader, with no index and no migration;
 S3 reconstructs the same logical bundle from index-listed objects at
 `<publication>/data/<relative-file-path>`. CRIU/CUDA retain their producer formats.
 
