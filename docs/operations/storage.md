@@ -51,7 +51,7 @@ Every agent pod also runs a PageBroker sidecar, from its own image at the
 agent's tag, which owns the movement of checkpoint data between the PVC and the
 node. Both containers mount the same PVC
 at `/checkpoints`, so artifacts land in the same place regardless of which
-container wrote them. The PVC layout is unchanged.
+container wrote them.
 
 PageBroker runs as privileged root so its GPU engine can operate on workload
 CUDA processes and device mappings, and it can write artifacts on the shared PVC.
@@ -60,35 +60,45 @@ PageBroker adds one memory-backed volume per agent pod, shared by the agent and
 the sidecar:
 
 - **Checkpoint.** CRIU dumps the image into a staging directory on that volume.
-  When the dump succeeds, PageBroker publishes it to the PVC and replaces any
-  previous artifact for the same checkpoint atomically. A failed dump is aborted
-  and never touches the PVC.
-- **Restore.** PageBroker copies the artifact from the PVC into staging first.
-  CRIU then restores from memory instead of reading the PVC directly.
+  When the dump succeeds, PageBroker publishes it to the PVC: it renames any
+  previous artifact for the same checkpoint aside, then renames the new one
+  into place. The destination path is briefly absent between those two renames.
+  A failed dump is aborted and never touches the PVC.
+- **Restore.** By default (`pageBroker.restoreMode: direct`), CRIU restores
+  directly from the artifact already on the PVC; nothing is copied into
+  staging. Setting `pageBroker.restoreMode: staged` has PageBroker copy the
+  artifact into staging first, and CRIU restores from memory instead.
 
 Because the staging volume is RAM, size the agent pod for it:
 
-| Value                                | Purpose                                                                                 | Default     |
-|--------------------------------------|-----------------------------------------------------------------------------------------|-------------|
-| `pageBroker.staging.sizeLimit`       | Cap on the shared staging volume. PageBroker refuses a restore that does not fit        | `64Gi`      |
-| `daemonset.resources.limits.memory`  | Bounds the largest checkpoint image, since CRIU writes staging from the agent container | `64Gi`      |
-| `pageBroker.resources.limits.memory` | Bounds restore prefetch, since PageBroker fills staging on restore                      | `256Gi`     |
-| `pageBroker.resources.requests`      | GPU transfer rings and process memory; added to the agent's requests when scheduling             | 8 CPU / 32Gi |
+| Value                                | Purpose                                                                                        | Default      |
+|---------------------------------------|--------------------------------------------------------------------------------------------------|--------------|
+| `pageBroker.staging.sizeLimit`       | Cap on the shared staging volume, used for checkpoint and staged restore                        | `64Gi`       |
+| `daemonset.resources.limits.memory`  | Bounds the largest checkpoint image, since CRIU writes staging from the agent container         | `64Gi`       |
+| `pageBroker.resources.limits.memory` | Bounds staged-restore prefetch, since PageBroker fills staging only in staged restore mode       | `256Gi`      |
+| `pageBroker.resources.requests`      | GPU transfer rings and process memory; added to the agent's requests when scheduling            | 8 CPU / 32Gi |
 
 Pages written to the staging volume are charged to the container that wrote
-them, not to the volume. Keep `sizeLimit` at or below the smaller of the two
-memory limits so that an oversized transfer fails PageBroker's capacity check
-with `INSUFFICIENT_STORAGE` instead of OOM-killing the writer. Leaving
-`sizeLimit` empty sizes the tmpfs from node allocatable memory, which is larger
-than either limit and defeats that check.
+them (the agent during checkpoint, PageBroker during staged restore), not to
+the volume. By default `sizeLimit` and `daemonset.resources.limits.memory` are
+both `64Gi`, leaving no headroom for the agent's own process and CRIU memory
+while staging a checkpoint near that size. Leave that headroom — either lower
+`sizeLimit` or raise the agent memory limit — when sizing for your workloads.
+The staging-space check (`INSUFFICIENT_STORAGE`) only rejects a transfer that
+would exceed `sizeLimit`; it does not guarantee protection from an OOM kill,
+and it has no way to know the size of a checkpoint before CRIU writes it.
+Leaving `sizeLimit` missing, null, or empty falls back to the chart's `64Gi`
+default, not the node's allocatable memory.
 
-To checkpoint workloads whose CPU memory exceeds the defaults, raise all three
-together, for example for images up to 200Gi:
+To checkpoint workloads whose CPU memory exceeds the defaults, raise the
+staging cap and both memory limits together, leaving headroom above the cap
+for agent process memory — for example, a 200Gi staging budget with 24Gi of
+headroom:
 
 ```bash
 helm upgrade snapshot ... \
-  --set daemonset.resources.limits.memory=200Gi \
-  --set pageBroker.resources.limits.memory=200Gi \
+  --set daemonset.resources.limits.memory=224Gi \
+  --set pageBroker.resources.limits.memory=224Gi \
   --set pageBroker.staging.sizeLimit=200Gi
 ```
 
@@ -98,8 +108,12 @@ Limits are not checked at scheduling time.
 
 When upgrading from a chart that shipped without PageBroker, do not use
 `helm upgrade --reuse-values`: it keeps the previous chart's defaults, including
-the old 4Gi agent memory limit. Use `--reset-then-reuse-values` or pass your
-overrides explicitly.
+the old 4Gi agent memory limit. Use `--reset-then-reuse-values` instead, which
+resets to the new chart's defaults but still carries forward any value you
+explicitly overrode before — including an old memory limit or staging size, if
+you had set one. Review `daemonset.resources.limits.memory`,
+`pageBroker.resources.limits.memory`, and `pageBroker.staging.sizeLimit`
+together after upgrading, or pass all three explicitly.
 
 ## Retention
 
