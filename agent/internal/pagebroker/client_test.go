@@ -185,11 +185,15 @@ func TestRequestReturnsAPermanentDialErrorImmediately(t *testing.T) {
 }
 
 func TestCommitRetriesLostResponses(t *testing.T) {
+	const limit = 5 * time.Second
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
+	if err := listener.(*net.UnixListener).SetDeadline(time.Now().Add(limit)); err != nil {
+		t.Fatal(err)
+	}
 
 	requests := make(chan *Request, 3)
 	server := make(chan error, 1)
@@ -197,6 +201,11 @@ func TestCommitRetriesLostResponses(t *testing.T) {
 		for attempt := 0; attempt < 3; attempt++ {
 			connection, err := listener.Accept()
 			if err != nil {
+				server <- err
+				return
+			}
+			if err := connection.SetDeadline(time.Now().Add(limit)); err != nil {
+				_ = connection.Close()
 				server <- err
 				return
 			}
@@ -224,8 +233,13 @@ func TestCommitRetriesLostResponses(t *testing.T) {
 	if err := (Client{ControlSocketPath: listener.Addr().String()}).Commit(ctx, "transaction"); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-server; err != nil {
-		t.Fatal(err)
+	select {
+	case err := <-server:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(limit):
+		t.Fatal("fake server did not observe all retry attempts")
 	}
 	for range 3 {
 		request := <-requests
