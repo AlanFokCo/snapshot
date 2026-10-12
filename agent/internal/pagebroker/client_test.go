@@ -253,31 +253,8 @@ func TestCommitRetriesLostResponses(t *testing.T) {
 func TestCommitStopsWhenRetryResponseHangs(t *testing.T) {
 	const limit = 5 * time.Second
 
-	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	if err := listener.(*net.UnixListener).SetDeadline(time.Now().Add(limit)); err != nil {
-		t.Fatal(err)
-	}
-
-	accepted := make(chan net.Conn, 2)
-	acceptErr := make(chan error, 1)
-	go func() {
-		for range 2 {
-			connection, err := listener.Accept()
-			if err != nil {
-				acceptErr <- err
-				return
-			}
-			if err := connection.SetDeadline(time.Now().Add(limit)); err != nil {
-				acceptErr <- err
-				return
-			}
-			accepted <- connection
-		}
-	}()
+	listener := newBoundedUnixListener(t, limit)
+	accepted, acceptErr := acceptConnections(listener, 2, limit)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -317,31 +294,8 @@ func TestCommitStopsOnItsOwnRetryBudgetWithALongCallerDeadline(t *testing.T) {
 	commitRetryLimit = 200 * time.Millisecond
 	defer func() { commitRetryLimit = original }()
 
-	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	if err := listener.(*net.UnixListener).SetDeadline(time.Now().Add(limit)); err != nil {
-		t.Fatal(err)
-	}
-
-	accepted := make(chan net.Conn, 2)
-	acceptErr := make(chan error, 1)
-	go func() {
-		for range 2 {
-			connection, err := listener.Accept()
-			if err != nil {
-				acceptErr <- err
-				return
-			}
-			if err := connection.SetDeadline(time.Now().Add(limit)); err != nil {
-				acceptErr <- err
-				return
-			}
-			accepted <- connection
-		}
-	}()
+	listener := newBoundedUnixListener(t, limit)
+	accepted, acceptErr := acceptConnections(listener, 2, limit)
 
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
@@ -367,9 +321,45 @@ func TestCommitStopsOnItsOwnRetryBudgetWithALongCallerDeadline(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) || IsDialError(err) {
 			t.Fatalf("Commit() error = %v, want its own retry deadline, not the caller's", err)
 		}
+		if ctx.Err() != nil {
+			t.Fatal("caller context already expired; Commit did not stop on its own retry budget")
+		}
 	case <-time.After(limit):
 		t.Fatal("Commit did not return after its own retry budget expired")
 	}
+}
+
+func newBoundedUnixListener(t *testing.T, limit time.Duration) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	if err := listener.(*net.UnixListener).SetDeadline(time.Now().Add(limit)); err != nil {
+		t.Fatal(err)
+	}
+	return listener
+}
+
+func acceptConnections(listener net.Listener, count int, limit time.Duration) (<-chan net.Conn, <-chan error) {
+	accepted := make(chan net.Conn, count)
+	acceptErr := make(chan error, 1)
+	go func() {
+		for range count {
+			connection, err := listener.Accept()
+			if err != nil {
+				acceptErr <- err
+				return
+			}
+			if err := connection.SetDeadline(time.Now().Add(limit)); err != nil {
+				acceptErr <- err
+				return
+			}
+			accepted <- connection
+		}
+	}()
+	return accepted, acceptErr
 }
 
 func acceptConnection(t *testing.T, accepted <-chan net.Conn, acceptErr <-chan error, limit time.Duration, label string) net.Conn {
