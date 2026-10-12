@@ -36,7 +36,7 @@ SPDX-License-Identifier: Apache-2.0
 Allow Snapshot to save checkpoint artifacts to S3-compatible object storage and
 restore workloads from them.
 PVC remains the default. Stage 1 uses one store per installation, selected at
-Helm install/upgrade, and a fixed deletion delay for S3 artifacts. Stage 2
+Helm install/upgrade, and deletes artifacts immediately on both backends. Stage 2
 adds explicit coordination between active storage operations and maintenance.
 
 ## Motivation
@@ -51,8 +51,9 @@ future stores be added with minimal changes to workload APIs.
 - Use the same in-process maintenance workqueue model for PVC, S3 and future backends.
 - Preserve artifact identity and verify publication, restore and deletion across
   retries, restarts and storage configuration changes.
-- Reject new operations after deletion begins. Stage 1 drains admitted operations
-  through bounded transaction lifetimes; Stage 2 adds active-operation fencing.
+- Reject new operations after deletion begins. Stage 1 deletes immediately and
+  lets the sweep remove anything that lands late; Stage 2 adds active-operation
+  fencing.
 - Keep storage credentials outside workload APIs and the agent process. The
   operator manager is the one exception: since maintenance runs in-process, it
   carries storage credentials, scoped to maintenance operations only.
@@ -175,7 +176,6 @@ sequenceDiagram
     participant S3 as S3-compatible store
     Rec->>API: Content has deletion timestamp
     Rec->>W: Enqueue delete-content(storeID, artifactUID)
-    W->>W: Wait out the deletion delay (S3 only)
     W->>API: Reread content, still deleting, same UID
     W->>S3: List and delete artifacts/artifactUID/ under the bound store
     W->>S3: Verify nothing remains
@@ -206,11 +206,11 @@ compatibility gate still runs before process restore.
 **Cleanup:** once a `PodSnapshotContent` has a deletion timestamp, no new operation
 may start on it: no checkpoint writing into it and no restore reading from it.
 Creating a new `PodSnapshot` is unaffected; it gets its own content. The reconciler
-enqueues `delete-content`, and a periodic tick enqueues `sweep`. For S3 the worker
-first waits out a deletion delay, then rereads ownership, deletes the artifact
-under the bound store and removes the finalizer. Anything short of confirmed
-deletion keeps the finalizer and retries. The delay and its reasons are defined
-once under [Maintenance](#maintenance).
+enqueues `delete-content`, and a periodic tick enqueues `sweep`. The worker rereads
+ownership, deletes the artifact under the bound store and removes the finalizer.
+Anything short of confirmed deletion keeps the finalizer and retries. Deletion is
+immediate on both backends; what that means for S3 is described once under
+[Maintenance](#maintenance).
 
 **Recovery:** the checkpoint was published but the agent died before writing the
 descriptor into status. The reconciler sees a bound content with a missing
@@ -226,7 +226,7 @@ closed.
 | Changed store | The installation is switched to another store, or back again. Content bound to the old store cannot be reached through the new one. If the old store is gone, its content can never be cleaned up. | The content keeps `storeID`, `artifactHandle` and format version; the bucket layout is keyed by content UID. Switching S3 → PVC → the same S3 configuration hashes to the same `storeID`, so old checkpoints restore again with no migration. Every operation refuses a mismatched binding before any I/O. While the original store is inactive, deletion cannot be confirmed: the content gets a `StoreInactive` condition and an event and keeps its finalizer; the sweep retries. An administrator can set the annotation `snapshot.nvidia.com/release-artifacts=true` to drop the finalizer; the artifacts left behind are recorded in an event. |
 | Credentials or S3 outage | The key is revoked or the store is unreachable during a checkpoint, a restore or a cleanup. | Check destination access before capture and source access before restore. Bound retries and timeouts. Preflight cannot guarantee later access, so every operation handles denial mid-way. Access denial never proves that an artifact is missing, so it never triggers deletion or recovery. |
 | Uncertain publication | PageBroker uploaded the checkpoint but the `Commit` reply to the agent was lost, or one side restarted. Nobody knows whether the publication exists. | The publication has a fixed name, `commitID`, that both sides compute in advance. A retried `Commit` writes to the same path and is a no-op if it is already there. Recovery fetches exactly that name and never picks by timestamp. Uploads resume only from complete staging; CUDA/CRIU are never replayed. |
-| Cleanup races | On S3, deleting an artifact while a restore is still downloading it fails the restore, and an upload that lands after cleanup leaves an orphan. On PVC neither happens: an unlinked file stays readable to a process that has it open. | S3 deletion waits out a fixed delay before touching storage; PVC deletion is unchanged. The delay is defined under [Maintenance](#maintenance). Its consequence: S3 artifact reclamation lags a content deletion by a little over two hours in Stage 1. A publication that still lands after cleanup is an orphan the next sweep removes. Stage 2 replaces the delay with explicit active-operation tracking. |
+| Cleanup races | On S3, deleting an artifact while a restore is still downloading it fails the restore, and an upload that lands after cleanup leaves an orphan. On PVC neither happens: an unlinked file stays readable to a process that has it open. | Deletion is immediate on both backends, as today. A restore interrupted by deletion fails and reports it; the content was deleted under it. A publication that lands after cleanup is an orphan the next sweep removes. Stage 2 adds explicit active-operation tracking so cleanup can wait for in-flight operations. |
 | Metadata loss | The `PodSnapshotContent` objects are lost, for example a cluster rebuilt from scratch. The artifacts are still in the bucket but nothing owns them, and the next sweep would delete them as orphans. | Back up the content objects separately. While they are being restored from backup, pause sweeps and new operations until an administrator resumes. |
 | Operator process risk | Maintenance already runs inside the operator process for PVC, so a panic or leak there affects reconciliation, and a leadership change drops in-flight work. S3 widens this: the process now holds store credentials and performs network transfers, not only local deletes. | Existing mitigations stay: panics isolated per task, bounded worker pool and transfer concurrency, pending work rebuilt from cluster state after any restart or leadership change. Credentials are scoped to maintenance operations only. |
 
@@ -334,8 +334,7 @@ listed below.
 **Roles.** The content reconciler decides *when*: a deletion timestamp enqueues
 `delete-content`, a periodic tick enqueues `sweep`, and a confirmed publication with
 no descriptor in status enqueues `recover-metadata`. A bounded pool of workers
-decides *whether*: it waits out the deletion delay where one applies, rereads
-ownership, takes the artifact lock and then acts. Backends know *how*: they list, inspect and delete
+decides *whether*: it rereads ownership, takes the artifact lock and then acts. Backends know *how*: they list, inspect and delete
 objects under the store prefix for PVC or S3. Maintenance never calls PageBroker.
 
 **Eligibility.** Per-content deletion is scoped by the content's bound `storeID` and
@@ -345,17 +344,13 @@ artifact UIDs under the store prefix and keeps only those with no live content.
 `recover-metadata` derives the expected `commitID` and accepts only a confirmed index
 carrying it.
 
-**Deletion delay (S3 only).** On PVC an unlinked file stays readable to a process
-that already has it open, so deletion is immediate today and stays that way. On S3
-a deleted object disappears under a running download, and an upload accepted
-before transaction expiry can land after cleanup. So for content bound to an S3
-store the worker waits before touching storage until the deletion timestamp plus:
-the longest gap between the agent's deletion check and `Prepare` (a fixed margin),
-the 2h05m PageBroker transaction lifetime, and a clock-skew allowance that also
-absorbs provider-side completion of a request accepted just before expiry. The
-agent checks the deletion timestamp once, as today; nothing is reread. The
-consequence is that S3 reclamation lags deletion by a little over two hours in
-Stage 1. Stage 2 replaces the delay with active-operation tracking.
+**Immediate deletion.** Deletion is immediate on both backends, as today. On PVC an
+unlinked file stays readable to a process that already has it open. On S3 a deleted
+object disappears under a running download, so a restore that is still downloading
+fails and reports the failure; the content was deleted under it. An upload accepted
+before transaction expiry can land after cleanup; it is an orphan the next sweep
+removes. The agent checks the deletion timestamp once, as today; nothing is reread.
+Stage 2 adds active-operation tracking so cleanup can wait for in-flight operations.
 
 **Safety.** Any result that is too early, partial, denied or unknown keeps the finalizer and
 requeues with backoff. Nothing is ever selected by object timestamp; a conflicting
@@ -377,7 +372,7 @@ backend calls stay idempotent because a request issued before cancellation may
 still finish.
 
 Maintenance and PageBroker share the store-ID, artifact format and Stage 1
-transaction and deletion-delay contracts, with Go/C++ compatibility fixtures. Stage 2 adds
+transaction contracts, with Go/C++ compatibility fixtures. Stage 2 adds
 the cross-component active-operation and generation-fencing contract.
 
 #### Snapshot agent
@@ -385,9 +380,7 @@ the cross-component active-operation and generation-fencing contract.
 What changes for S3, and why:
 
 - **Deletion check unchanged.** The agent checks the content's deletion timestamp
-  once, as today, and then starts its PageBroker transaction. The gap between that
-  check and `Prepare` is bounded by code and is one input to the S3 deletion delay
-  under [Maintenance](#maintenance); there is no reread.
+  once, as today, and then starts its PageBroker transaction; there is no reread.
 - **Metadata through PageBroker.** The agent has no credentials and no bucket
   access, so it obtains the manifest through `GetArtifactMetadata` on the shared
   volume and then runs the existing compatibility checks unchanged. Storage checks
@@ -502,8 +495,8 @@ expiry before every new storage operation and immediately before publishing the
 checkpoint index; expiry returns `TRANSACTION_EXPIRED` and leaves unconfirmed data
 for sweeping. Every SDK request uses a deadline no later than the transaction expiry,
 so no new request starts after it. Expiry bounds request issue, not provider
-completion: a request the provider accepted before expiry may finish after it. The
-S3 deletion delay under [Maintenance](#maintenance) accounts for that. Bound individual
+completion: a request the provider accepted before expiry may finish after it, and
+the next sweep removes what it leaves behind. Bound individual
 transfers through broker timeouts and SDK retries. Extend `Abort` to stop transfers
 before cleanup; it cannot undo committed data or CUDA/CRIU. Restore `Commit` cleans
 local staging.
@@ -620,10 +613,8 @@ struct; they come from the projected Secret files.
   PVC mode, the operator manager mounts the shared claim directly.
 - Configure the maintenance worker pool size, per-task timeout and retry backoff on
   the operator manager itself.
-- For S3, configure the admission margin and clock-skew allowance that feed the
-  deletion delay defined under [Maintenance](#maintenance); Helm rejects zero or
-  unbounded values. The 2h05m PageBroker transaction lifetime is a constant and is
-  not configurable. PVC has no deletion delay.
+- The 2h05m PageBroker transaction lifetime is a constant and is not configurable.
+  Neither backend has a deletion delay.
 - Match Snapshot/PageBroker image versions. PageBroker reads mounted configuration
   and has no Kubernetes client.
 
@@ -731,7 +722,7 @@ Use existing conditions with storage-specific reasons and rate-limited updates.
 Measure phase duration, transfer bytes/retries, credential failures, staging
 pressure and cleanup backlog. Expose workqueue depth, per-key retry counts and
 worker utilization as operator metrics. Count transaction expiry, credential reload
-success/failure and cleanup deferrals; expose remaining S3 deletion-delay time.
+success/failure and cleanup deferrals.
 Correlate logs with content, transaction and work-item key. Report cleanup separately
 and preserve historical success.
 
@@ -743,7 +734,7 @@ and preserve historical success.
 - Shared store-ID, artifact-format and publication/read/delete contracts.
 
 Before coding, finalize the credentials-file format and SDKs, canonical store-ID
-encoding, protobuf tags, the S3 deletion-delay inputs, recovery-mode control and
+encoding, protobuf tags, recovery-mode control and
 numeric resource/time limits. Finalize the active-operation and generation-fencing
 protocol before enabling Stage 2 concurrent deletion.
 
@@ -779,8 +770,8 @@ backend integration with a disposable S3-compatible service, and GPU end-to-end 
   lost replies/restarts, exact `commitID` repair, missing/duplicate/conflicting
   publications and no CUDA/CRIU replay.
 - **Lifecycle/concurrency:** inspection cleanup on success/refusal/requeue/cancellation;
-  uncached deletion checks; S3 deletion waiting the complete delay while PVC
-  deletion stays immediate; expiration during upload/download; an index `PUT`
+  uncached deletion checks; immediate deletion on both backends, including S3
+  deletion under a running download; expiration during upload/download; an index `PUT`
   accepted before expiry that completes after cleanup is removed by the following
   sweep; stale publishers, incomplete attempts and capture-node loss. Stage 2 adds concurrent
   delete/read/publish races, operation expiry and stale-generation rejection.
@@ -799,8 +790,8 @@ an emulator or mocked CUDA path alone does not qualify provider/GPU support.
 ### Graduation Criteria
 
 - **Alpha (Stage 1):** demonstrate S3 capture/restore without a checkpoint PVC and
-  deletion after the S3 deletion delay with PVC deletion unchanged; prove the
-  delay and transaction expiry, exact `commitID` recovery, PVC compatibility, credential
+  immediate deletion with PVC deletion unchanged; prove transaction expiry, exact
+  `commitID` recovery, PVC compatibility, credential
   rotation and core failure paths.
 - **Beta (Stage 2):** qualify advertised providers and GPU workloads under sustained
   load; add explicit active-operation tracking and generation fencing, then prove
