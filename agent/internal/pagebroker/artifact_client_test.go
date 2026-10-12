@@ -20,7 +20,7 @@ import (
 func testPublication() *PublishedArtifact {
 	return &PublishedArtifact{
 		StoreId:               "store-v1-" + strings.Repeat("a", 64),
-		ArtifactHandle:        "artifacts/content-1/containers/main/publications/p-1/index.json",
+		ArtifactHandle:        "artifacts/content-1/containers/main/index.json",
 		ArtifactFormatVersion: "snapshot.pagebroker/v1",
 	}
 }
