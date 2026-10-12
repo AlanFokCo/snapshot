@@ -213,10 +213,12 @@ immediate on both backends; what that means for S3 is described once under
 [Maintenance](#maintenance).
 
 **Agent loss after publication:** the checkpoint was published but the agent died
-before writing the descriptor into status. There is no recovery of that
-publication: the content stays without a descriptor and never becomes Ready, and a
-new capture is a new content with a new UID. The objects are removed when the
-content is deleted. This mirrors PVC today.
+before writing the descriptor into status. When the agent comes back it asks
+PageBroker for the index at the fixed key for that content and container. Present
+and naming the same store, content UID and container: the agent writes the
+descriptor and marks the content Ready. Absent: the capture is failed, and a new
+capture is a new content with a new UID. The operator never reads the bucket for
+this; the probe goes through PageBroker like every other agent access.
 
 ### Limitations, Risks, and Mitigations
 
@@ -224,7 +226,7 @@ content is deleted. This mirrors PVC today.
 | --- | --- | --- |
 | Changed store | The installation is switched to another store, or back again. Content bound to the old store cannot be reached through the new one. If the old store is gone, its content can never be cleaned up. | The content keeps `storeID`, `artifactHandle` and format version; the bucket layout is keyed by content UID. Switching S3 → PVC → the same S3 configuration hashes to the same `storeID`, so old checkpoints restore again with no migration. Every operation refuses a mismatched binding before any I/O. While the original store is inactive, deletion cannot be confirmed: the content gets a `StoreInactive` condition and an event and keeps its finalizer; the sweep retries. An administrator can set the annotation `snapshot.nvidia.com/release-artifacts=true` to drop the finalizer; the artifacts left behind are recorded in an event. |
 | Credentials or S3 outage | The key is revoked or the store is unreachable during a checkpoint, a restore or a cleanup. | Check destination access before capture and source access before restore. Bound retries and timeouts. Preflight cannot guarantee later access, so every operation handles denial mid-way. Access denial never proves that an artifact is missing, so it never triggers deletion. |
-| Uncertain publication | PageBroker uploaded the checkpoint but the `Commit` reply to the agent was lost, or one side restarted. Nobody knows whether the publication exists. | The publication has one fixed path per content and container. A retried `Commit` checks that path and is a no-op if a matching index is already there. Uploads resume only from complete staging; CUDA/CRIU are never replayed. If the agent itself is lost before status is written, the content fails and a new attempt gets a new UID. |
+| Uncertain publication | PageBroker uploaded the checkpoint but the `Commit` reply to the agent was lost, or one side restarted. Nobody knows whether the publication exists. | The publication has one fixed path per content and container. A retried `Commit` checks that path and is a no-op if a matching index is already there. Uploads resume only from complete staging; CUDA/CRIU are never replayed. If the agent itself is lost before status is written, it probes the same fixed path through PageBroker on restart and finishes or fails the capture from what it finds. |
 | Cleanup races | On S3, deleting an artifact while a restore is still downloading it fails the restore, and an upload that lands after cleanup leaves an orphan. On PVC neither happens: an unlinked file stays readable to a process that has it open. | Deletion is immediate on both backends, as today. A restore interrupted by deletion fails and reports it; the content was deleted under it. A publication that lands after cleanup is an orphan the next sweep removes. Stage 2 adds explicit active-operation tracking so cleanup can wait for in-flight operations. |
 | Metadata loss | The `PodSnapshotContent` objects are lost, for example a cluster rebuilt from scratch. The artifacts are still in the bucket but nothing owns them, and the next sweep would delete them as orphans. | Back up the content objects separately. While they are being restored from backup, pause sweeps and new operations until an administrator resumes. |
 | Operator process risk | Maintenance already runs inside the operator process for PVC, so a panic or leak there affects reconciliation, and a leadership change drops in-flight work. S3 widens this: the process now holds store credentials and performs network transfers, not only local deletes. | Existing mitigations stay: panics isolated per task, bounded worker pool and transfer concurrency, pending work rebuilt from cluster state after any restart or leadership change. Credentials are scoped to maintenance operations only. |
