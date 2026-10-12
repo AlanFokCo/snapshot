@@ -148,6 +148,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	broker := pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 	var gpu *pagebroker.CustomStorageExecution
 	committed := false
+	preparationAttempted := false
 	gpuRestoreComplete := false
 	usePageBrokerGPU := false
 	var terminateFailedRestore func(context.Context) error
@@ -163,14 +164,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		if gpu != nil {
 			defer gpu.Close()
 		}
-		if usePageBrokerGPU && transactionID != "" && !committed {
+		if usePageBrokerGPU && transactionID != "" && !committed && preparationAttempted {
 			var err error
 			if gpu != nil && !gpuRestoreComplete {
 				err = abortRestoreTransaction(ctx, gpu, terminateFailedRestore)
 			} else {
-				abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
-				err = broker.Abort(abortCtx, transactionID)
-				cancel()
+				err = abortPageBrokerTransaction(broker, transactionID)
 			}
 			if err != nil {
 				if retErr != nil {
@@ -181,10 +180,8 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			}
 		}
 		cleanup()
-		if !usePageBrokerGPU && transactionID != "" && !committed {
-			abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
-			defer cancel()
-			if err := broker.Abort(abortCtx, transactionID); err != nil {
+		if !usePageBrokerGPU && transactionID != "" && !committed && preparationAttempted {
+			if err := abortPageBrokerTransaction(broker, transactionID); err != nil {
 				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("abort PageBroker restore %q: %w", transactionID, err))
 			}
 		}
@@ -194,7 +191,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		log.Error(cleanupErr, "restore cleanup failed")
 		if retErr == nil {
 			retErr = NewRestoreCleanupError(cleanupErr)
+			return
 		}
+		retErr = errors.Join(retErr, cleanupErr)
 	}()
 
 	restoreStart := time.Now()
@@ -264,13 +263,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		})
 	}
 
-	containerCheckpointPath := nsmount.CheckpointDst
 	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
 	transactionID = uuid.NewString()
-	broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 	stageStart := time.Now()
 	direct := req.PageBrokerRestoreMode != "staged"
 	var staged string
+	preparationAttempted = true
 	if direct {
 		err = broker.DirectRestore(ctx, transactionID, artifactPath)
 	} else {
@@ -278,6 +276,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 	pageBrokerStageDuration = time.Since(stageStart)
 	if err != nil {
+		preparationAttempted = !pagebroker.IsDialError(err)
 		return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
 	}
 	if usePageBrokerGPU {
@@ -287,13 +286,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		}
 	}
 	mountStart := time.Now()
-	var sourceMount nsmount.MountPoint
-	if direct {
-		sourceMount, err = mounts.MountArtifact(ctx, bundleMount, artifactPath)
-	} else {
-		sourceMount, err = mounts.MountPageBroker(ctx, bundleMount, staged)
-		containerCheckpointPath = nsmount.PageBrokerDst
-	}
+	sourceMount, containerCheckpointPath, err := mountRestoreSource(ctx, mounts, bundleMount, direct, artifactPath, staged)
 	pageBrokerMountDuration = time.Since(mountStart)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("mount PageBroker restore source: %w", err)
@@ -382,6 +375,17 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	)
 
 	return RestoreResult{PlaceholderHostPID: snap.PlaceholderPID, RestoredPID: result.RestoredPID}, nil
+}
+
+// mountRestoreSource mounts the direct artifact or the PageBroker-staged copy into
+// the placeholder and reports which path nsrestore should read the checkpoint from.
+func mountRestoreSource(ctx context.Context, mounts RestoreMounter, bundleMount nsmount.MountPoint, direct bool, artifactPath, staged string) (nsmount.MountPoint, string, error) {
+	if direct {
+		sourceMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
+		return sourceMount, nsmount.CheckpointDst, err
+	}
+	sourceMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
+	return sourceMount, nsmount.PageBrokerDst, err
 }
 
 func remainingDuration(wall time.Duration, parts ...time.Duration) time.Duration {

@@ -464,10 +464,15 @@ func captureGPU(ctx context.Context, data *types.CheckpointManifest, state *type
 	return timings.TotalDuration, nil
 }
 
-func abortCheckpointTransaction(broker pagebroker.Client, transactionID string, cause error) error {
+// abortPageBrokerTransaction runs Abort with the shared release timeout.
+func abortPageBrokerTransaction(broker pagebroker.Client, transactionID string) error {
 	abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
 	defer cancel()
-	if err := broker.Abort(abortCtx, transactionID); err != nil {
+	return broker.Abort(abortCtx, transactionID)
+}
+
+func abortCheckpointTransaction(broker pagebroker.Client, transactionID string, cause error) error {
+	if err := abortPageBrokerTransaction(broker, transactionID); err != nil {
 		cause = errors.Join(cause, fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err))
 	}
 	return cause
