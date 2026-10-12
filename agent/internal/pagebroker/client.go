@@ -25,12 +25,11 @@ const (
 	maxMessageSize    = 64 << 10
 	messageHeaderSize = 4
 	commitRetryDelay  = 100 * time.Millisecond
+	dialRetryDelay    = 100 * time.Millisecond
+	dialRetryLimit    = 30 * time.Second
 )
 
-var (
-	commitRetryLimit   = 30 * time.Second
-	errMessageTooLarge = fmt.Errorf("message exceeds %d bytes", maxMessageSize)
-)
+var commitRetryLimit = 30 * time.Second
 
 // Client uses the deployment-wide filesystem/POSIX PageBroker plan.
 type Client struct {
@@ -91,7 +90,7 @@ func imageDirectory(directory string) (string, error) {
 
 func (c Client) Commit(ctx context.Context, transactionID string) error {
 	err := c.commit(ctx, transactionID)
-	if !isTransportError(err) {
+	if !isRetryableTransportError(err) {
 		return err
 	}
 	return c.retryCommit(ctx, transactionID)
@@ -106,7 +105,7 @@ func (c Client) retryCommit(ctx context.Context, transactionID string) error {
 			return retryCtx.Err()
 		case <-time.After(commitRetryDelay):
 		}
-		if err := c.commit(retryCtx, transactionID); !isTransportError(err) {
+		if err := c.commit(retryCtx, transactionID); !isRetryableTransportError(err) {
 			return err
 		}
 	}
@@ -121,11 +120,6 @@ func (c Client) commit(ctx context.Context, transactionID string) error {
 		return fmt.Errorf("unexpected PageBroker commit response")
 	}
 	return nil
-}
-
-func isTransportError(err error) bool {
-	var transport transportError
-	return errors.As(err, &transport)
 }
 
 func (c Client) Abort(ctx context.Context, transactionID string) error {
@@ -143,10 +137,40 @@ func (c Client) abort(ctx context.Context, transactionID string, files ...*os.Fi
 	return nil
 }
 
+func transientDialError(err error) bool {
+	return errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ECONNREFUSED)
+}
+
+func (c Client) dial(ctx context.Context) (net.Conn, error) {
+	dialer := &net.Dialer{}
+	retryCtx, cancel := context.WithTimeout(ctx, dialRetryLimit)
+	defer cancel()
+	for {
+		connection, err := dialer.DialContext(retryCtx, "unix", c.ControlSocketPath)
+		if err == nil {
+			return connection, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !transientDialError(err) {
+			return nil, err
+		}
+		select {
+		case <-retryCtx.Done():
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, err
+		case <-time.After(dialRetryDelay):
+		}
+	}
+}
+
 func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
 	response, brokerProcess, err := c.requestResponse(ctx, transactionID, false, command, files...)
 	if brokerProcess != nil {
-		brokerProcess.Close()
+		_ = brokerProcess.Close()
 	}
 	return response, err
 }
@@ -156,9 +180,16 @@ func (c Client) requestWithProcess(ctx context.Context, transactionID string, co
 }
 
 func (c Client) requestResponse(ctx context.Context, transactionID string, requestBrokerPidfd bool, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
-	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
+	var connection net.Conn
+	var err error
+	if _, startup := command.(*Request_Capabilities); startup {
+		// Startup owns its retry budget and must see permanent endpoint errors immediately.
+		connection, err = (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
+	} else {
+		connection, err = c.dial(ctx)
+	}
 	if err != nil {
-		return nil, nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
+		return nil, nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err), dial: true}
 	}
 	defer connection.Close()
 	return exchangeResponse(ctx, connection.(*net.UnixConn), transactionID, requestBrokerPidfd, command, files...)
@@ -167,7 +198,7 @@ func (c Client) requestResponse(ctx context.Context, transactionID string, reque
 func exchange(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
 	response, brokerProcess, err := exchangeResponse(ctx, connection, transactionID, false, command, files...)
 	if brokerProcess != nil {
-		brokerProcess.Close()
+		_ = brokerProcess.Close()
 	}
 	return response, err
 }
@@ -196,7 +227,7 @@ func exchangeResponse(ctx context.Context, connection *net.UnixConn, transaction
 	defer func() {
 		if !retained {
 			for _, fd := range receivedFiles {
-				unix.Close(fd)
+				_ = unix.Close(fd)
 			}
 		}
 	}()
@@ -231,33 +262,6 @@ func exchangeResponse(ctx context.Context, connection *net.UnixConn, transaction
 	}
 	retained = true
 	return response, os.NewFile(uintptr(receivedFiles[0]), "pagebroker-process"), nil
-}
-
-type failureError struct {
-	code    Failure_Code
-	message string
-}
-
-func failureCode(code Failure_Code) Failure_Code {
-	switch code {
-	case Failure_UNSPECIFIED, Failure_INVALID_REQUEST, Failure_TRANSACTION_NOT_FOUND, Failure_TRANSACTION_CONFLICT,
-		Failure_INSUFFICIENT_STORAGE, Failure_STORAGE_ERROR, Failure_INTERNAL_ERROR, Failure_UNAVAILABLE:
-		return code
-	default:
-		return Failure_UNSPECIFIED
-	}
-}
-
-type transportError struct {
-	cause error
-}
-
-func (e transportError) Error() string { return e.cause.Error() }
-
-func (e transportError) Unwrap() error { return e.cause }
-
-func (e failureError) Error() string {
-	return fmt.Sprintf("PageBroker %s: %s", e.code, e.message)
 }
 
 func filesystem(directory string) *StorageBackend {

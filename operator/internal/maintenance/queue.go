@@ -6,6 +6,7 @@ package maintenance
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -41,7 +42,7 @@ type Queue struct {
 // NewQueue constructs a Queue; register it with the manager (mgr.Add) to run
 // it. It fails if the configured backend has no registered implementation,
 // so an unsupported --artifact-cleanup-backend-type cannot reach readiness.
-func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record.EventRecorder, cfg operatortypes.ArtifactCleanupConfig) (*Queue, error) {
+func NewQueue(ctx context.Context, kubeClient client.Client, apiReader client.Reader, recorder record.EventRecorder, cfg operatortypes.ArtifactCleanupConfig) (*Queue, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -60,7 +61,9 @@ func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record
 			workqueue.TypedRateLimitingQueueConfig[WorkItemKey]{Name: "podsnapshotcontent-maintenance"},
 		),
 	}
-	q.registry.Init(cfg)
+	if err := q.registry.Init(ctx, cfg); err != nil {
+		return nil, err
+	}
 	if _, err := q.backend(); err != nil {
 		return nil, err
 	}
@@ -136,7 +139,7 @@ func (q *Queue) processNextItem(ctx context.Context, logger logr.Logger) bool {
 		return true
 	}
 
-	if err := q.process(ctx, key, logger); err != nil {
+	if err := q.processWithDeadline(ctx, key, logger); err != nil {
 		switch {
 		case ctx.Err() != nil:
 		case key.Mode == ModeSweep:
@@ -154,6 +157,22 @@ func (q *Queue) processNextItem(ctx context.Context, logger logr.Logger) bool {
 	}
 	q.queue.Forget(key)
 	return true
+}
+
+// processWithDeadline turns a panic or an overrun into an ordinary failure of
+// this one work item, so it is retried instead of stopping the operator or
+// holding a worker indefinitely.
+func (q *Queue) processWithDeadline(ctx context.Context, key WorkItemKey, logger logr.Logger) (err error) {
+	taskCtx, cancel := context.WithTimeout(ctx, q.config.TaskTimeout)
+	defer cancel()
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("maintenance work item panicked: %v", r)
+			logger.Error(err, "Recovered from a panic in a maintenance work item",
+				"mode", key.Mode, "name", key.Name, "stack", string(debug.Stack()))
+		}
+	}()
+	return q.process(taskCtx, key, logger)
 }
 
 func (q *Queue) process(ctx context.Context, key WorkItemKey, logger logr.Logger) error {

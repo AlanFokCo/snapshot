@@ -77,6 +77,8 @@ func main() {
 	}
 	result, err := executor.RestoreInNamespace(ctx, opts, log)
 	if err != nil {
+		// The host agent reads the cause from stdout; stderr only reaches its logs.
+		_ = json.NewEncoder(os.Stdout).Encode(executor.RestoreInNamespaceResult{Error: err.Error()})
 		fatal(log, err, "restore failed")
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {

@@ -54,7 +54,7 @@ because the cluster has a single node:
 | Faked | Why it is needed |
 | --- | --- |
 | Node label `nvidia.com/gpu.present=true` | the agent DaemonSet and workload pods both select GPU nodes |
-| `RuntimeClass/nvidia` on the `runc` handler | the agent pod hardcodes `runtimeClassName: nvidia` |
+| `RuntimeClass/nvidia` on the `runc` handler | the agent pod defaults to `runtimeClassName: nvidia` |
 | hostPath `PersistentVolume` declared `ReadWriteMany` | the installer requires an RWX checkpoint claim, and k3d's local-path provisioner is RWO |
 
 The script stops there. It does not install Snapshot and does not create the
@@ -180,6 +180,129 @@ vcluster delete "$SNAPSHOT_E2E_VCLUSTER_NAME" -n "$SNAPSHOT_E2E_HOST_NAMESPACE"
 kubectl delete namespace "$SNAPSHOT_E2E_HOST_NAMESPACE" --ignore-not-found
 rm -f "$SNAPSHOT_E2E_TARGET_KUBECONFIG"
 ```
+
+## Installing a Published Version
+
+`snapshot-install` installs the local `./charts/snapshot` by default. To install
+a published release or main build instead, point it at the chart in GHCR:
+
+```bash
+export SNAPSHOT_E2E_SNAPSHOT_TAG=v0.1.0
+export SNAPSHOT_E2E_CHART_REF=oci://ghcr.io/ai-dynamo/snapshot/snapshot
+export SNAPSHOT_E2E_CHART_VERSION=0.1.0
+
+uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-install
+```
+
+The chart version is the image tag without the leading `v`. Main builds use
+`v0.0.0-g<sha8>` images and chart version `0.0.0-g<sha8>`.
+
+`hack/resolve-snapshot-image-tag.py` resolves which versions to upgrade from
+and checks that their operator and agent images and chart are published. It
+prints a JSON list of `{tag, chart_version}` and drops the version under test:
+
+```bash
+# Latest release
+python3 hack/resolve-snapshot-image-tag.py --from ""
+# Newest patch release of each of the last 3 minor versions
+python3 hack/resolve-snapshot-image-tag.py --from-minor-versions 3
+# Specific release tags and main commits
+python3 hack/resolve-snapshot-image-tag.py --from v0.1.0,1a2b3c4d
+```
+
+Only main and release-branch commits are published, so a feature-branch commit
+cannot be used. Set `GH_TOKEN` to avoid GitHub API rate limits.
+
+## Upgrade Tests
+
+`tests/test_upgrade.py` checks that state created on an older Snapshot version
+survives an upgrade. Install the older version from GHCR first, then run the
+test. The test performs the upgrade itself, to the chart in this checkout.
+
+`SNAPSHOT_E2E_SNAPSHOT_TAG` names the version being installed, so it is the old
+version for `snapshot-install` and the new version for the test:
+
+```bash
+export SNAPSHOT_E2E_UPGRADE_FROM_TAG=v0.1.0
+export UPGRADE_TO_TAG=<published-main-tag>
+
+# 1. Install the old version from GHCR
+SNAPSHOT_E2E_SNAPSHOT_TAG="$SNAPSHOT_E2E_UPGRADE_FROM_TAG" \
+SNAPSHOT_E2E_CHART_REF=oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+SNAPSHOT_E2E_CHART_VERSION="${SNAPSHOT_E2E_UPGRADE_FROM_TAG#v}" \
+  uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-install
+SNAPSHOT_E2E_SNAPSHOT_TAG="$SNAPSHOT_E2E_UPGRADE_FROM_TAG" \
+  uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-ready
+
+# 2. Create state, upgrade to the new version, and validate
+SNAPSHOT_E2E_SNAPSHOT_TAG="$UPGRADE_TO_TAG" \
+  uv run --project e2e pytest e2e/tests/test_upgrade.py -m upgrade -vv -s
+```
+
+A run has three phases:
+
+1. **PreUpgrade:** each selected scenario creates its state on the old version,
+   such as a source pod and a ready `PodSnapshot`.
+2. **Upgrade:** `helm upgrade` to the new version using the local chart.
+   `test_upgrade_completed` checks the release is deployed, the operator and
+   agent run the new images with no restarts or panics, pagebroker runs next
+   to every upgraded agent exactly when the new chart deploys it, the CRD
+   installer succeeded, and the served CRDs match `api/v1alpha1/crds`.
+3. **PostUpgrade:** `test_global_invariants` checks every pre-upgrade snapshot
+   is still Ready and still has its artifacts on the PVC. Then each scenario
+   validates its own state in `test_post_upgrade[<scenario>]`.
+
+Optional settings:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SNAPSHOT_E2E_UPGRADE_PROFILE` | `basic` | `basic` runs the core scenarios; `all` runs every scenario |
+| `SNAPSHOT_E2E_UPGRADE_SCENARIOS` | empty | Comma-separated scenario names; overrides the profile |
+| `SNAPSHOT_E2E_UPGRADE_CONFIG` | `full` | How the upgrade is performed, see below |
+
+Upgrade configs:
+
+| Config | What it does |
+| --- | --- |
+| `full` | `helm upgrade` with the same values the install used |
+| `reset-then-reuse-values` | `helm upgrade --reset-then-reuse-values` with only the image tags set: keeps the old install's values and takes new defaults from the chart. This is the documented upgrade command for users who don't pass their values again |
+| `operator-first` | Sets the agent DaemonSet to `OnDelete`, then upgrades: the new operator runs against the old agents, as in a rollout where the operator finishes first |
+| `agent-first` | Pauses the operator Deployment, then upgrades: the new agents run against the old operator, and the CRDs stay at the old version |
+
+Each phase's duration is printed at the end, and appended to
+`GITHUB_STEP_SUMMARY` in CI.
+
+### Upgrade runs in CI
+
+The **E2E Upgrade Tests** workflow (`.github/workflows/e2e-upgrade.yaml`) runs
+this test once per pair of version to upgrade from, upgrade config, and scenario
+profile. Each pair gets its own vCluster, installs the old version from GHCR,
+and upgrades to the version under test.
+
+The versions to upgrade from are the newest patch release of each of the last
+`UPGRADE_FROM_MINOR_VERSIONS` (3) minor versions, prereleases excluded. With
+fewer minor versions, the newest patch release of each existing minor version
+is tested.
+
+| Trigger | Profile | Configs | Skipping |
+| --- | --- | --- | --- |
+| Nightly (`0 8 * * *`) | `basic` | `full` | A pair is skipped when nothing under `agent`, `operator`, `api`, `charts`, `e2e`, the workflow, its actions, or the gate and resolver scripts changed since its last pass on `main` |
+| Weekly (`0 13 * * 6`) | `all` | every config | None |
+| Manual | `upgrade_profile` input | `upgrade_config` input; `default` uses the profile's configs | None |
+
+The workflow-level `env` block holds these settings. `hack/upgrade-e2e-gate.py`
+decides which pairs run and lists every decision in the job summary. If it
+cannot read the run history from the GitHub API, every pair runs.
+Only scheduled runs count toward the nightly skip rule; manual runs can test
+a different target image or a reduced scenario set under the same job name.
+
+Manual runs accept `upgrade_from` as a comma-separated list of release tags or
+main commit hashes, and `snapshot_tag` for a version to upgrade to other than
+the checked-out commit.
+
+To add a scenario, subclass `UpgradeScenario` in
+`snapshot_e2e/upgrade/scenarios.py`. Implement `pre_upgrade` and `post_upgrade`,
+and register it in `SCENARIOS` with the profiles it belongs to.
 
 ## Restore Verification
 

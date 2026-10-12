@@ -116,7 +116,8 @@ const (
 type restoreResult struct {
 	destination string
 	state       restoreResultState
-	reason      string
+	// reason explains a failed or incompatible outcome.
+	reason string
 }
 
 type restorePendingError struct {
@@ -692,6 +693,8 @@ type restoreTally struct {
 	incompatible           []string
 	pending                []string
 	incompatibilityReasons []string
+	// failureReasons holds "<destination>: <cause>" for each failed destination.
+	failureReasons []string
 }
 
 type restoreVerdict struct {
@@ -724,6 +727,11 @@ func tallyRestoreResults(results []restoreResult) restoreTally {
 			tally.succeeded = append(tally.succeeded, result.destination)
 		case restoreResultFailed:
 			tally.failed = append(tally.failed, result.destination)
+			reason := result.destination
+			if result.reason != "" {
+				reason = fmt.Sprintf("%s: %s", result.destination, result.reason)
+			}
+			tally.failureReasons = append(tally.failureReasons, reason)
 		case restoreResultPending:
 			tally.pending = append(tally.pending, result.destination)
 		case restoreResultIncompatible:
@@ -756,12 +764,13 @@ func (t restoreTally) verdict(snapshotName string) restoreVerdict {
 				len(t.succeeded), snapshotName, strings.Join(t.succeeded, ", ")),
 		}
 	case len(t.succeeded) != 0:
-		notRestored := append(append([]string{}, t.failed...), t.incompatible...)
+		// Causes can contain commas, so entries are separated by semicolons.
+		notRestored := append(append([]string{}, t.failureReasons...), t.incompatible...)
 		return restoreVerdict{
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonPartiallySucceeded,
 			message: fmt.Sprintf("Restored %d of %d destination containers from PodSnapshot %s; not restored: %s",
-				len(t.succeeded), t.total, snapshotName, strings.Join(notRestored, ", ")),
+				len(t.succeeded), t.total, snapshotName, strings.Join(notRestored, "; ")),
 		}
 	case len(t.failed) == 0:
 		return restoreVerdict{
@@ -773,15 +782,15 @@ func (t restoreTally) verdict(snapshotName string) restoreVerdict {
 		return restoreVerdict{
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonFailed,
-			message: fmt.Sprintf("Restore failed for %d destination container(s) and refused %d incompatible destination(s) from PodSnapshot %s",
-				len(t.failed), len(t.incompatible), snapshotName),
+			message: fmt.Sprintf("Restore failed for %d destination container(s) and refused %d incompatible destination(s) from PodSnapshot %s: %s",
+				len(t.failed), len(t.incompatible), snapshotName, strings.Join(t.failureReasons, "; ")),
 		}
 	default:
 		return restoreVerdict{
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonFailed,
 			message: fmt.Sprintf("Restore failed for all %d destination container(s) from PodSnapshot %s: %s",
-				len(t.failed), snapshotName, strings.Join(t.failed, ", ")),
+				len(t.failed), snapshotName, strings.Join(t.failureReasons, "; ")),
 		}
 	}
 }
@@ -837,6 +846,7 @@ func (w *NodeController) restoreDestination(
 			return result
 		}
 		result.state = restoreResultFailed
+		result.reason = err.Error()
 		log.Error(err, "Restore controller worker failed")
 		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
 		return result
@@ -992,8 +1002,6 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 		DestinationContainerName:    op.destination,
 		SkipCompatCheck:             op.skipCompatCheck,
 		Clientset:                   w.clientset,
-		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] != snapshotv1alpha1.PageBrokerAnnotationDisabled,
-		PageBrokerEnabled:           w.config.PageBroker.Enabled,
 		CustomStorageAvailable:      w.config.CustomStorageAvailable,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
 		PageBrokerRestoreMode:       w.config.PageBroker.RestoreMode,
