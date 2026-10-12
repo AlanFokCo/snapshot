@@ -29,7 +29,6 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
-	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
@@ -178,35 +177,45 @@ func TestGPUMappingLeavesCountPolicyToInspectGate(t *testing.T) {
 	}
 }
 
+const (
+	wholeGPUListing = `printf '%s\n' 'GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)'`
+	migSliceListing = wholeGPUListing + ` '  MIG 1g.5gb      Device  0: (UUID: MIG-a)'`
+)
+
+// installFakeMIGListing answers the nvidia-smi -L probe for pid 42 with body,
+// and fails it when called any other way.
+func installFakeMIGListing(t *testing.T, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\nset -eu\n" +
+		`test "$*" = "--mount=/host/proc/42/ns/mnt --pid=/host/proc/42/ns/pid -- nvidia-smi -L"` + "\n" +
+		body + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "nsenter"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake nsenter: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func TestRefuseMIGRestore(t *testing.T) {
 	tests := []struct {
-		name   string
-		slices []string
-		err    error
-		skip   bool
-		want   string
+		name    string
+		listing string
+		skip    bool
+		want    string
 	}{
 		{
-			name:   "a slice is refused at the inspect gate",
-			slices: []string{"1g.5gb MIG-a"},
-			want:   "restore refused as incompatible: mig-slice: source whole GPU, target MIG slice 1g.5gb MIG-a",
+			name:    "a slice is refused at the inspect gate",
+			listing: migSliceListing,
+			want:    "restore refused as incompatible: mig-slice: source whole GPU, target MIG slice 1g.5gb MIG-a",
 		},
-		{name: "a whole GPU is admitted"},
-		{name: "slices that cannot be listed are admitted", err: errors.New("nvidia-smi failed")},
-		{name: "a skipped check never looks", slices: []string{"1g.5gb MIG-a"}, skip: true},
+		{name: "a whole GPU is admitted", listing: wholeGPUListing},
+		{name: "slices that cannot be listed are admitted", listing: "exit 17"},
+		{name: "a skipped check admits a slice", listing: migSliceListing, skip: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			discover := func(_ context.Context, hostProcPath string, pid int) ([]string, error) {
-				if tc.skip {
-					t.Fatal("a skipped check listed MIG slices")
-				}
-				if hostProcPath != snapshotruntime.HostProcPath || pid != 42 {
-					t.Fatalf("listed MIG slices of %s pid %d", hostProcPath, pid)
-				}
-				return tc.slices, tc.err
-			}
-			err := refuseMIGRestore(context.Background(), testr.New(t), discover, 42, tc.skip)
+			installFakeMIGListing(t, tc.listing)
+			err := refuseMIGRestore(context.Background(), testr.New(t), 42, tc.skip)
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("refuseMIGRestore() = %v, want nil", err)

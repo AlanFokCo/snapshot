@@ -297,7 +297,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	var gpuDevicePaths map[string]string
 	var gpuDeviceMapDuration time.Duration
 	if len(cudaHostPIDs) > 0 {
-		if err := refuseMIGCapture(ctx, log, cuda.DiscoverMIGSlices, pid); err != nil {
+		if err := refuseMIGCapture(ctx, log, pid); err != nil {
 			return nil, 0, err
 		}
 		gpuStart := time.Now()
