@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -250,48 +251,138 @@ func TestCommitRetriesLostResponses(t *testing.T) {
 }
 
 func TestCommitStopsWhenRetryResponseHangs(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
+	const limit = 5 * time.Second
 
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
+	if err := listener.(*net.UnixListener).SetDeadline(time.Now().Add(limit)); err != nil {
+		t.Fatal(err)
+	}
 
 	accepted := make(chan net.Conn, 2)
+	acceptErr := make(chan error, 1)
 	go func() {
 		for range 2 {
 			connection, err := listener.Accept()
 			if err != nil {
+				acceptErr <- err
+				return
+			}
+			if err := connection.SetDeadline(time.Now().Add(limit)); err != nil {
+				acceptErr <- err
 				return
 			}
 			accepted <- connection
 		}
 	}()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
 	result := make(chan error, 1)
 	go func() {
 		result <- (Client{ControlSocketPath: listener.Addr().String()}).Commit(ctx, "transaction")
 	}()
 
-	first := <-accepted
+	first := acceptConnection(t, accepted, acceptErr, limit, "first")
 	if _, err := readMessage(first); err != nil {
 		t.Fatal(err)
 	}
 	_ = first.Close()
 
-	second := <-accepted
+	second := acceptConnection(t, accepted, acceptErr, limit, "retry")
 	defer second.Close()
 	if _, err := readMessage(second); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-result; !errors.Is(err, context.DeadlineExceeded) || IsDialError(err) {
-		t.Fatalf("Commit() error = %v, want retry deadline after a lost response", err)
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) || IsDialError(err) {
+			t.Fatalf("Commit() error = %v, want retry deadline after a lost response", err)
+		}
+	case <-time.After(limit):
+		t.Fatal("Commit did not return after the retry deadline")
 	}
-	if _, err := readMessage(second); err == nil {
-		t.Fatal("retry connection did not close")
+	if _, err := readMessage(second); !errors.Is(err, io.EOF) {
+		t.Fatalf("retry connection read error = %v, want io.EOF from peer close", err)
 	}
+}
+
+func TestCommitStopsOnItsOwnRetryBudgetWithALongCallerDeadline(t *testing.T) {
+	const limit = 5 * time.Second
+	original := commitRetryLimit
+	commitRetryLimit = 200 * time.Millisecond
+	defer func() { commitRetryLimit = original }()
+
+	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := listener.(*net.UnixListener).SetDeadline(time.Now().Add(limit)); err != nil {
+		t.Fatal(err)
+	}
+
+	accepted := make(chan net.Conn, 2)
+	acceptErr := make(chan error, 1)
+	go func() {
+		for range 2 {
+			connection, err := listener.Accept()
+			if err != nil {
+				acceptErr <- err
+				return
+			}
+			if err := connection.SetDeadline(time.Now().Add(limit)); err != nil {
+				acceptErr <- err
+				return
+			}
+			accepted <- connection
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- (Client{ControlSocketPath: listener.Addr().String()}).Commit(ctx, "transaction")
+	}()
+
+	first := acceptConnection(t, accepted, acceptErr, limit, "first")
+	if _, err := readMessage(first); err != nil {
+		t.Fatal(err)
+	}
+	_ = first.Close()
+
+	second := acceptConnection(t, accepted, acceptErr, limit, "retry")
+	defer second.Close()
+	if _, err := readMessage(second); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) || IsDialError(err) {
+			t.Fatalf("Commit() error = %v, want its own retry deadline, not the caller's", err)
+		}
+	case <-time.After(limit):
+		t.Fatal("Commit did not return after its own retry budget expired")
+	}
+}
+
+func acceptConnection(t *testing.T, accepted <-chan net.Conn, acceptErr <-chan error, limit time.Duration, label string) net.Conn {
+	t.Helper()
+	select {
+	case connection := <-accepted:
+		return connection
+	case err := <-acceptErr:
+		t.Fatalf("accept %s connection: %v", label, err)
+	case <-time.After(limit):
+		t.Fatalf("server did not observe the %s connection", label)
+	}
+	return nil
 }
 
 func TestAbortRequiresAbortComplete(t *testing.T) {
