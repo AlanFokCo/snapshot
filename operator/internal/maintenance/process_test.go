@@ -45,7 +45,7 @@ func prepareTestArtifactRoot(t *testing.T, uid string) (string, string) {
 
 func testConfig(basePath string) operatortypes.ArtifactCleanupConfig {
 	return operatortypes.ArtifactCleanupConfig{
-		BasePath: basePath, ScanInterval: time.Hour, BatchSize: 10, ListAttempts: 3, Workers: 1, BackendType: backends.NamePVC,
+		BasePath: basePath, ScanInterval: time.Hour, BatchSize: 10, ListAttempts: 3, Workers: 1, TaskTimeout: time.Minute, BackendType: backends.NamePVC,
 	}
 }
 

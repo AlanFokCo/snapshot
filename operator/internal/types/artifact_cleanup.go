@@ -15,6 +15,7 @@ const (
 	DefaultArtifactBatchSize    = 10
 	DefaultArtifactListAttempts = 3
 	DefaultArtifactWorkers      = 5
+	DefaultArtifactTaskTimeout  = 10 * time.Minute
 	DefaultArtifactBackendType  = "pvc"
 )
 
@@ -25,6 +26,7 @@ type ArtifactCleanupConfig struct {
 	BatchSize    int
 	ListAttempts int
 	Workers      int
+	TaskTimeout  time.Duration
 	BackendType  string
 	// S3 is nil unless the S3 maintenance backend is configured.
 	S3 *S3Config
@@ -39,6 +41,9 @@ func (c ArtifactCleanupConfig) Validate() error {
 	}
 	if c.Workers <= 0 {
 		return fmt.Errorf("artifact cleanup worker count must be positive")
+	}
+	if c.TaskTimeout <= 0 {
+		return fmt.Errorf("artifact cleanup task timeout must be positive")
 	}
 	if c.BackendType == "" {
 		return fmt.Errorf("artifact cleanup backend type is required")

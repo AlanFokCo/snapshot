@@ -21,6 +21,7 @@ func TestBindArtifactCleanupFlagsDefaults(t *testing.T) {
 	assert.Equal(t, 10*time.Minute, cfg.ScanInterval)
 	assert.Equal(t, 10, cfg.BatchSize)
 	assert.Equal(t, 3, cfg.ListAttempts)
+	assert.Equal(t, 10*time.Minute, cfg.TaskTimeout)
 	assert.Nil(t, cfg.S3, "S3 backend must stay disabled when no bucket flag is set")
 }
 
@@ -47,6 +48,8 @@ func TestArtifactCleanupFlagsRejectNonPositiveSettings(t *testing.T) {
 		{"negative batch", "artifact-cleanup-batch-size", "-1"},
 		{"zero attempts", "artifact-cleanup-list-attempts", "0"},
 		{"negative attempts", "artifact-cleanup-list-attempts", "-1"},
+		{"zero task timeout", "artifact-cleanup-task-timeout", "0s"},
+		{"negative task timeout", "artifact-cleanup-task-timeout", "-1s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			flags := flag.NewFlagSet("test", flag.ContinueOnError)

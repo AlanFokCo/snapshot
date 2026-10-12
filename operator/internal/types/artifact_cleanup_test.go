@@ -12,7 +12,7 @@ import (
 
 func validArtifactCleanupConfig() ArtifactCleanupConfig {
 	return ArtifactCleanupConfig{
-		BasePath: "/checkpoints", ScanInterval: time.Minute, BatchSize: 1, ListAttempts: 1, Workers: 1, BackendType: "pvc",
+		BasePath: "/checkpoints", ScanInterval: time.Minute, BatchSize: 1, ListAttempts: 1, Workers: 1, TaskTimeout: time.Minute, BackendType: "pvc",
 	}
 }
 

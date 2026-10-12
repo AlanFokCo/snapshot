@@ -312,3 +312,65 @@ func TestFailedSweepWaitsForNextTrigger(t *testing.T) {
 	assert.Zero(t, q.queue.Len())
 	assert.Zero(t, q.queue.NumRequeues(newSweepKey()))
 }
+
+type stubBackend struct {
+	delete func(ctx context.Context) error
+}
+
+func (b stubBackend) Name() string { return backends.NamePVC }
+
+func (b stubBackend) Delete(ctx context.Context, _ string) error { return b.delete(ctx) }
+
+func (b stubBackend) Candidates(context.Context, logr.Logger) (map[string]struct{}, error) {
+	return map[string]struct{}{}, nil
+}
+
+func queueWithPendingDelete(t *testing.T, backend Backend) (*Queue, WorkItemKey) {
+	t.Helper()
+	now := metav1.Now()
+	content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{
+		Name: "content", UID: "uid-1", ResourceVersion: "1", DeletionTimestamp: &now,
+		Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+	}}
+	q, _ := newTestQueue(t, t.TempDir(), content)
+	q.registry = BackendRegistry{backends: map[string]Backend{backends.NamePVC: backend}}
+	key := newDeleteContentKey(content.Name, content.UID)
+	q.EnqueueDeleteContent(key.Name, key.UID)
+	return q, key
+}
+
+func requireFinalizerRetained(t *testing.T, q *Queue) {
+	t.Helper()
+	current := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, q.client.Get(context.Background(), client.ObjectKey{Name: "content"}, current))
+	assert.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
+}
+
+func TestProcessNextItemRetriesItemThatPanicked(t *testing.T) {
+	q, key := queueWithPendingDelete(t, stubBackend{delete: func(context.Context) error {
+		panic("backend bug")
+	}})
+
+	require.True(t, q.processNextItem(context.Background(), logr.Discard()))
+	assert.Equal(t, 1, q.queue.NumRequeues(key))
+	requireFinalizerRetained(t, q)
+}
+
+func TestProcessNextItemRetriesItemThatOverranItsTimeout(t *testing.T) {
+	q, key := queueWithPendingDelete(t, stubBackend{delete: func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}})
+	q.config.TaskTimeout = 20 * time.Millisecond
+
+	done := make(chan bool, 1)
+	go func() { done <- q.processNextItem(context.Background(), logr.Discard()) }()
+	select {
+	case keepGoing := <-done:
+		require.True(t, keepGoing)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled backend call held the worker past the task timeout")
+	}
+	assert.Equal(t, 1, q.queue.NumRequeues(key))
+	requireFinalizerRetained(t, q)
+}
