@@ -100,6 +100,38 @@ func TestInspectContainerToleratesUnreadableRuntimeImageID(t *testing.T) {
 	assert.Contains(t, logged[0], "runtime image unavailable")
 }
 
+func TestRefuseMIGCapture(t *testing.T) {
+	tests := []struct {
+		name   string
+		slices []string
+		err    error
+		want   string
+	}{
+		{
+			name:   "a slice is refused",
+			slices: []string{"1g.5gb MIG-a", "1g.5gb MIG-b"},
+			want:   "refused as incompatible: mig-slice: the container holds MIG slice 1g.5gb MIG-a, 1g.5gb MIG-b, and Snapshot supports whole GPUs only",
+		},
+		{name: "a whole GPU is captured"},
+		{name: "slices that cannot be listed are captured", err: errors.New("nvidia-smi failed")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			discover := func(_ context.Context, hostProcPath string, pid int) ([]string, error) {
+				assert.Equal(t, snapshotruntime.HostProcPath, hostProcPath)
+				assert.Equal(t, 42, pid)
+				return tc.slices, tc.err
+			}
+			err := refuseMIGCapture(context.Background(), logr.Discard(), discover, 42)
+			if tc.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.EqualError(t, err, tc.want)
+		})
+	}
+}
+
 func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 	checkpointDir := t.TempDir()
 	_, _, err := configureCheckpoint(

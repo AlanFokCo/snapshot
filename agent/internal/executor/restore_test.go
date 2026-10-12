@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
@@ -174,6 +175,52 @@ func TestGPUMappingLeavesCountPolicyToInspectGate(t *testing.T) {
 	}
 	if len(incompatible.Mismatches) != 1 || incompatible.Mismatches[0].Check != compat.CheckGPUCount {
 		t.Fatalf("expected GPU count check, got %+v", incompatible.Mismatches)
+	}
+}
+
+func TestRefuseMIGRestore(t *testing.T) {
+	tests := []struct {
+		name   string
+		slices []string
+		err    error
+		skip   bool
+		want   string
+	}{
+		{
+			name:   "a slice is refused at the inspect gate",
+			slices: []string{"1g.5gb MIG-a"},
+			want:   "restore refused as incompatible: mig-slice: source whole GPU, target MIG slice 1g.5gb MIG-a",
+		},
+		{name: "a whole GPU is admitted"},
+		{name: "slices that cannot be listed are admitted", err: errors.New("nvidia-smi failed")},
+		{name: "a skipped check never looks", slices: []string{"1g.5gb MIG-a"}, skip: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			discover := func(_ context.Context, hostProcPath string, pid int) ([]string, error) {
+				if tc.skip {
+					t.Fatal("a skipped check listed MIG slices")
+				}
+				if hostProcPath != snapshotruntime.HostProcPath || pid != 42 {
+					t.Fatalf("listed MIG slices of %s pid %d", hostProcPath, pid)
+				}
+				return tc.slices, tc.err
+			}
+			err := refuseMIGRestore(context.Background(), testr.New(t), discover, 42, tc.skip)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("refuseMIGRestore() = %v, want nil", err)
+				}
+				return
+			}
+			var incompatible *compat.IncompatibleError
+			if !errors.As(err, &incompatible) || incompatible.Gate != compat.GateInspect {
+				t.Fatalf("refuseMIGRestore() = %v, want an inspect gate refusal", err)
+			}
+			if err.Error() != tc.want {
+				t.Fatalf("refuseMIGRestore() = %q, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
