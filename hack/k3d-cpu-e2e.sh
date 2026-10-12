@@ -184,13 +184,12 @@ cluster_up() {
     exit 1
   fi
 
-  # The directory is created by whoever runs this script and is then the
-  # checkpoint PVC inside the node. Both the agent and PageBroker containers
-  # run privileged as root, but this host directory crosses the bind-mount
-  # boundary from the host into the k3d node and then into the pod; a root
-  # mkdir inside the pod does not reliably get write access across those
-  # boundaries. Make it world-writable, as a dynamic hostPath provisioner does
-  # for the volumes it hands out.
+  # The directory is created by whoever runs this script, as that user, with
+  # mode 0755, and is then the checkpoint PVC inside the node. PageBroker
+  # writes as a different UID and previously failed its first Commit here
+  # with "cannot create directories: Permission denied" under
+  # /checkpoints/artifacts. Make it world-writable, as a dynamic hostPath
+  # provisioner does for the volumes it hands out.
   mkdir -p "${HOST_CHECKPOINTS}"
   chmod 1777 "${HOST_CHECKPOINTS}"
   create_cluster
