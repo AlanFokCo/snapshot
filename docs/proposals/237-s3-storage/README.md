@@ -194,8 +194,8 @@ sequenceDiagram
 capture into staging → PageBroker uploads and publishes the index at a fixed path →
 agent persists the descriptor and Ready. The path is derived from the content UID
 and the container name, so a retried `Commit` writes to the same place and is a
-no-op if the index is already there. The index carries a `commitID` that binds it
-to its store, content and container; see
+no-op if the index is already there. The index records the store, content UID and
+container it was published for, and every reader refuses it on a mismatch; see
 [Publication and artifact format](#publication-and-artifact-format).
 
 **Restore:** agent → GetArtifactMetadata → Snapshot compatibility gates → StagedRestore
@@ -284,9 +284,9 @@ The operator sets `spec.storage.storeID` when it creates the `PodSnapshotContent
 The whole spec is immutable, so the binding can never be added or changed
 afterwards. A `PodSnapshotContent` represents one capture attempt, so its immutable
 UID already distinguishes a new attempt from a retry of the same attempt. Each
-container's index carries a `commitID` derived from `storeID`, `artifactUID` and
-`containerName`; it needs no Kubernetes API field. The definition and a worked
-example are under [Publication and artifact format](#publication-and-artifact-format).
+container's index records `storeID`, `artifactUID` and `containerName`; no further
+Kubernetes API field is needed. A worked example is under
+[Publication and artifact format](#publication-and-artifact-format).
 
 A store is the single storage configuration of the installation, defined in Helm
 and rendered into the storage ConfigMap described under
@@ -303,10 +303,14 @@ For PVC, encode backend, namespace, claim and normalized base path. Access setti
 are excluded: addressing mode, TLS CA, checksum mode and credentials describe how a
 client talks to the bucket, not where the bucket is. Changing them never changes
 the binding or the artifact location, so existing checkpoints stay reachable.
+Canonical encoding, shared by Go and C++: write each field as a 4-byte big-endian
+length followed by its UTF-8 bytes, version tag first; `storeID` is `store-v1-`
+followed by the lowercase hex SHA-256 of those bytes. The shared Go/C++ vectors live
+in `api/storage/testdata/identity.json`.
 
 `storeID` is the identity of the physical location, not only a guard against
-configuration changes. It keys the artifact prefix in the bucket, it is an input to
-`commitID`, and it scopes maintenance so a worker can never delete under a different
+configuration changes. It keys the artifact prefix in the bucket, it is recorded in
+every index, and it scopes maintenance so a worker can never delete under a different
 store. A reference to a configuration object cannot replace it: the object can be
 edited to point elsewhere, and the digest is what detects that. When a storage CRD
 introduces multiple stores, content gains a `storeRef` beside `storeID`; the
@@ -629,47 +633,36 @@ writing. Since a new capture attempt receives a new `artifactUID`, retries and
 restarts of one attempt land on the same key while a new attempt cannot adopt an
 old publication.
 
-Each index also carries a deterministic `commitID` derived from `storeID`,
-`artifactUID` and container name. It is not part of the path. Its job is to bind
-the index to the place it was published: a retried `Commit` and every restore
-recompute the value and refuse an index whose embedded `commitID` differs, which
-catches a bundle copied between stores or prefixes and any mismatch between the key
-and the body. The three inputs are what name one publication: one capture attempt
-(`artifactUID`), one container of it, in one store. Every component already holds
-those values, so no new API field is needed.
-
-Canonical encoding, shared by Go and C++: write each field as a 4-byte big-endian
-length followed by its UTF-8 bytes, in the order `snapshot.commit/v1`, `storeID`,
-`artifactUID`, `containerName`; `commitID` is `commit-v1-` followed by the lowercase
-hex SHA-256 of those bytes. `storeID` uses the same framing with its own version
-tag. The shared Go/C++ vectors live in `api/storage/testdata/identity.json`.
+Each index records the `storeID`, `artifactUID` and container name it was
+published for. A retried `Commit` and every restore compare those three fields with
+the caller's binding and refuse the index on any mismatch, which catches a bundle
+copied between stores or prefixes and any mismatch between the key and the body.
+Every component already holds those values, so no new API field is needed.
+`storeID` is the only derived identity; its encoding is defined under
+[Kubernetes API and operator](#kubernetes-api-and-operator).
 
 Worked example. Content `psc-7f3a` is created bound to store `store-v1-9c1e…`; its
-UID is the artifact UID and the pod has one container, `main`. Agent, PageBroker
-and maintenance can all compute `commit-v1-4b8d…` before capture starts.
+UID is the artifact UID and the pod has one container, `main`.
 
-1. The agent sends `prepare_staged_checkpoint` with the target. PageBroker derives
-   the same value and reserves `artifacts/<uid>/containers/main/`.
+1. The agent sends `prepare_staged_checkpoint` with the target. PageBroker reserves
+   `artifacts/<uid>/containers/main/`.
 2. Capture finishes and the agent sends `commit`. PageBroker uploads the data
-   objects under that path, then writes `index.json` last; the index carries
-   `commit-v1-4b8d…` inside it.
+   objects under that path, then writes `index.json` last; the index records
+   `store-v1-9c1e…`, the UID and `main`.
 3. The reply is lost. The agent cannot tell whether step 2 finished.
 4. The agent sends `commit` again on the same transaction. PageBroker checks
    `containers/main/index.json`. Absent: finish the upload to that path. Present
-   with embedded `commit-v1-4b8d…` and passing verification: return the same
-   `PublishedArtifact` without writing. Present with a different `commitID` or
+   with matching identity fields and passing verification: return the same
+   `PublishedArtifact` without writing. Present with different identity fields or
    failed verification: conflict, fail closed and leave it for repair. There is
    never a second publication.
 
-On restore, PageBroker recomputes `commit-v1-4b8d…` from the bound store, the
-content UID and the container name and refuses the index if its embedded value
-differs, before any data is downloaded.
+On restore, PageBroker compares the index's identity fields with the bound store,
+the content UID and the container name and refuses it on a mismatch, before any
+data is downloaded.
 
-A retried capture is a new content object with a new UID, so its path and hash
-differ and it can neither adopt nor overwrite the old publication. The
-`commitID` is not the transaction ID: the transaction ID is random, per RPC
-session and expires; the `commitID` is deterministic, per publication and
-permanent.
+A retried capture is a new content object with a new UID, so its path differs and
+it can neither adopt nor overwrite the old publication.
 
 Example publication descriptors; digest values are placeholders:
 
@@ -726,7 +719,7 @@ Tracking and test issues are not yet assigned. Cover unit/configuration checks,
 backend integration with a disposable S3-compatible service, and GPU end-to-end tests.
 
 - **API/configuration:** immutable store bindings, unique container descriptors,
-  identical Go/C++ `commitID` derivation, index refusal on mismatch, identical Go/C++
+  index refusal on identity mismatch, identical Go/C++
   store-ID results for endpoint/region/prefix variants, flipping `addressingMode`
   leaves `storeID` unchanged and old content restorable, and legacy PVC.
 - **Restore mode:** S3 restore with `restoreMode: direct` configured still takes
