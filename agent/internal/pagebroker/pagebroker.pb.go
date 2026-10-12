@@ -1197,7 +1197,6 @@ type Request struct {
 	// Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
 	// After two hours and five minutes, the transaction expires. This cancels GPU
 	// work. Expiry cleanup waits for active GPU transfers to stop.
-	// This is distinct from the deterministic commitID derived from the artifact target.
 	// Retries never extend a transaction's lifetime.
 	TransactionId *string `protobuf:"bytes,2,opt,name=transaction_id,json=transactionId,proto3,oneof" json:"transaction_id,omitempty"`
 	// Requests a pidfd for the serving PageBroker on a successful storage
