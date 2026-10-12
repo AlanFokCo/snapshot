@@ -112,6 +112,7 @@ type check struct {
 // gate that can evaluate it and kept in the order they are reported.
 var checksByGate = registerChecks(
 	cpuArchCheck,
+	cpuFeaturesCheck,
 	kernelVersionCheck,
 	kernelMinimumCheck,
 	imageDigestCheck,

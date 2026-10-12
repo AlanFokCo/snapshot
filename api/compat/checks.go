@@ -24,6 +24,40 @@ var cpuArchCheck = check{
 	compare: func(source, target Environment) []Mismatch { return mustMatch(source.CPUArch, target.CPUArch) },
 }
 
+// CheckCPUFeatures refuses a restore onto a CPU missing an instruction set the
+// checkpoint's CPU had. glibc and the numeric libraries pick their code paths
+// from CPUID once, when the process starts, and a restored process keeps those
+// picks: on a CPU without the instructions it dies of SIGILL the first time it
+// reaches one, after the restore has already reported success. A target with
+// more instruction sets than the source is fine.
+const CheckCPUFeatures Check = "cpu-features"
+
+var cpuFeaturesCheck = check{
+	name: CheckCPUFeatures,
+	gate: GatePreflight,
+	compare: func(source, target Environment) []Mismatch {
+		if len(source.CPUFeatures) == 0 || len(target.CPUFeatures) == 0 {
+			return nil
+		}
+		offered := make(map[string]bool, len(target.CPUFeatures))
+		for _, feature := range target.CPUFeatures {
+			offered[feature] = true
+		}
+		var missing []string
+		for _, feature := range InstructionSetFeatures(source.CPUFeatures) {
+			if !offered[feature] {
+				missing = append(missing, feature)
+			}
+		}
+		if len(missing) == 0 {
+			return nil
+		}
+		// One mismatch naming every missing flag: an AVX-512 source alone
+		// can be missing a dozen, and the condition has to stay readable.
+		return []Mismatch{{Source: strings.Join(missing, ","), Target: "missing"}}
+	},
+}
+
 // CheckKernelVersion refuses a restore onto a kernel other than the captured
 // one. Restores that had worked for over a year have broken on a kernel upgrade
 // alone: criu#2636.
