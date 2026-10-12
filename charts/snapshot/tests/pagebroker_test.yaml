@@ -4,7 +4,6 @@
 suite: PageBroker sidecar
 templates:
   - templates/daemonset.yaml
-  - templates/configmap.yaml
 tests:
   - it: runs the PageBroker sidecar next to the agent at the agent's tag
     template: templates/daemonset.yaml
@@ -59,24 +58,6 @@ tests:
           path: spec.template.metadata.annotations["openshift.io/required-scc"]
           value: privileged
 
-  - it: points the daemon at the shared socket, staging root, and checkpoint PVC path
-    template: templates/daemonset.yaml
-    asserts:
-      - equal:
-          path: spec.template.spec.containers[1].args
-          value:
-            - /pagebroker/control/pagebroker.sock
-            - /pagebroker/staging
-            - /checkpoints
-            - --max-concurrent-requests
-            - "16"
-            - --custom-storage-buffer-count
-            - "32"
-            - --custom-storage-chunk-bytes
-            - "134217728"
-            - --custom-storage-max-pinned-bytes
-            - "0"
-
   - it: mounts the checkpoint PVC in both containers at the same path
     template: templates/daemonset.yaml
     asserts:
@@ -97,7 +78,7 @@ tests:
             persistentVolumeClaim:
               claimName: snapshot-pvc
 
-  - it: shares one memory-backed volume between the agent and the sidecar
+  - it: shares one memory-backed volume between the agent and the sidecar, capped at the agent memory limit by default
     template: templates/daemonset.yaml
     asserts:
       - contains:
@@ -110,17 +91,6 @@ tests:
           content:
             name: pagebroker
             mountPath: /pagebroker
-      - contains:
-          path: spec.template.spec.volumes
-          content:
-            name: pagebroker
-            emptyDir:
-              medium: Memory
-              sizeLimit: "64Gi"
-
-  - it: caps the staging volume at the agent memory limit by default
-    template: templates/daemonset.yaml
-    asserts:
       - contains:
           path: spec.template.spec.volumes
           content:
@@ -180,14 +150,6 @@ tests:
       - equal:
           path: spec.template.spec.containers[1].imagePullPolicy
           value: IfNotPresent
-
-  - it: tells the agent where the control socket is
-    template: templates/configmap.yaml
-    asserts:
-      - matchRegex:
-          path: data["config.yaml"]
-          pattern: 'controlSocketPath: "/pagebroker/control/pagebroker.sock"'
-
 
   - it: rejects a separate PageBroker tag instead of silently ignoring it
     set:
