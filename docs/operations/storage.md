@@ -59,11 +59,15 @@ CUDA processes and device mappings, and it can write artifacts on the shared PVC
 PageBroker adds one memory-backed volume per agent pod, shared by the agent and
 the sidecar:
 
-- **Checkpoint.** CRIU dumps the image into a staging directory on that volume.
-  When the dump succeeds, PageBroker publishes it to the PVC: it renames any
-  previous artifact for the same checkpoint aside, then renames the new one
-  into place. The destination path is briefly absent between those two renames.
-  A failed dump is aborted and never touches the PVC.
+- **Checkpoint.** By default, CRIU dumps the image into a staging directory on
+  that volume. When the dump succeeds, PageBroker publishes it to the PVC: it
+  renames any previous artifact for the same checkpoint aside, then renames
+  the new one into place. The destination path is briefly absent between those
+  two renames. A failed dump is aborted and never touches the PVC. GPU
+  CustomStorage capture instead writes directly to a temporary directory
+  beside the destination on the PVC; a failed capture removes that temporary
+  directory without promoting it, so it still never publishes a completed
+  checkpoint, but it does touch the PVC along the way.
 - **Restore.** By default (`pageBroker.restoreMode: direct`), CRIU restores
   directly from the artifact already on the PVC; nothing is copied into
   staging. Setting `pageBroker.restoreMode: staged` has PageBroker copy the
@@ -91,16 +95,21 @@ Leaving `sizeLimit` missing, null, or empty falls back to the chart's `64Gi`
 default, not the node's allocatable memory.
 
 To checkpoint workloads whose CPU memory exceeds the defaults, raise the
-staging cap and both memory limits together, leaving headroom above the cap
-for agent process memory — for example, a 200Gi staging budget with 24Gi of
-headroom:
+staging cap and the agent memory limit together, leaving headroom above the
+cap for agent process memory — for example, a 200Gi staging budget with 24Gi
+of headroom:
 
 ```bash
 helm upgrade snapshot ... \
   --set daemonset.resources.limits.memory=224Gi \
-  --set pageBroker.resources.limits.memory=224Gi \
   --set pageBroker.staging.sizeLimit=200Gi
 ```
+
+Leave `pageBroker.resources.limits.memory` at its chart default (`256Gi`)
+here: PageBroker needs headroom above the staging cap too, on top of the
+default GPU transfer buffers (4 GiB per visible GPU, `32Gi` on an eight-GPU
+node by default). The chart default already covers both; raise it further
+only if your node has more GPUs or a larger `pageBroker.transferBufferCount`.
 
 Each agent pod requests 10 CPU and 33Gi of memory in total by default, including
 the GPU engine transfer rings. Nodes must have that allocatable capacity.
