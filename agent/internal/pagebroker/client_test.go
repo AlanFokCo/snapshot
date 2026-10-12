@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -116,6 +118,33 @@ func TestRequestStopsWaitingForSocketWhenContextExpires(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < limit || elapsed > 5*time.Second {
 		t.Fatalf("Abort() returned after %v, want about %v", elapsed, limit)
+	}
+}
+
+func TestRequestReturnsAPermanentDialErrorImmediately(t *testing.T) {
+	const limit = 350 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+
+	regularFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(regularFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(regularFile, "pagebroker.sock")
+
+	start := time.Now()
+	err := (Client{ControlSocketPath: socketPath}).Abort(ctx, "transaction")
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Abort() error = %v, want the permanent dial error, not the caller's deadline", err)
+	}
+	if !errors.Is(err, unix.ENOTDIR) {
+		t.Fatalf("Abort() error = %v, want errors.Is(err, unix.ENOTDIR)", err)
+	}
+	if !IsDialError(err) {
+		t.Fatalf("IsDialError(%v) = false, want true", err)
+	}
+	if elapsed := time.Since(start); elapsed >= limit {
+		t.Fatalf("Abort() returned after %v, want well under the %v caller deadline", elapsed, limit)
 	}
 }
 

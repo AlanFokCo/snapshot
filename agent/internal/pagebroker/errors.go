@@ -10,10 +10,12 @@ import (
 
 var errMessageTooLarge = fmt.Errorf("message exceeds %d bytes", maxMessageSize)
 
-// transportError marks a request whose outcome is unknown: the connection failed
-// before a response was read. Commit retries these; staging requests do not.
+// transportError wraps connection and I/O failures that Commit can retry.
+// A dial failure additionally never reached PageBroker, which IsDialError
+// reports for callers that need that distinction.
 type transportError struct {
 	cause error
+	dial  bool
 }
 
 func (e transportError) Error() string { return e.cause.Error() }
@@ -25,20 +27,11 @@ func isTransportError(err error) bool {
 	return errors.As(err, &transport)
 }
 
-// dialError marks a request that never reached PageBroker.
-type dialError struct {
-	cause error
-}
-
-func (e dialError) Error() string { return e.cause.Error() }
-
-func (e dialError) Unwrap() error { return e.cause }
-
 // IsDialError reports whether err came from failing to connect to PageBroker,
 // in which case the request never reached it.
 func IsDialError(err error) bool {
-	var dial dialError
-	return errors.As(err, &dial)
+	var transport transportError
+	return errors.As(err, &transport) && transport.dial
 }
 
 // failureError carries a Failure reply from PageBroker.

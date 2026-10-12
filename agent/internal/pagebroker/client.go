@@ -28,9 +28,7 @@ const (
 	dialRetryLimit    = 30 * time.Second
 )
 
-var (
-	commitRetryLimit = 30 * time.Second
-)
+var commitRetryLimit = 30 * time.Second
 
 // Client uses the deployment-wide filesystem/POSIX PageBroker plan.
 type Client struct {
@@ -134,15 +132,25 @@ func (c Client) Abort(ctx context.Context, transactionID string) error {
 	return nil
 }
 
+func transientDialError(err error) bool {
+	return errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ECONNREFUSED)
+}
+
 func (c Client) dial(ctx context.Context) (net.Conn, error) {
 	dialer := &net.Dialer{}
-	connection, err := dialer.DialContext(ctx, "unix", c.ControlSocketPath)
-	if err == nil || ctx.Err() != nil {
-		return connection, err
-	}
 	retryCtx, cancel := context.WithTimeout(ctx, dialRetryLimit)
 	defer cancel()
 	for {
+		connection, err := dialer.DialContext(retryCtx, "unix", c.ControlSocketPath)
+		if err == nil {
+			return connection, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !transientDialError(err) {
+			return nil, err
+		}
 		select {
 		case <-retryCtx.Done():
 			if ctx.Err() != nil {
@@ -150,10 +158,6 @@ func (c Client) dial(ctx context.Context) (net.Conn, error) {
 			}
 			return nil, err
 		case <-time.After(dialRetryDelay):
-		}
-		connection, err = dialer.DialContext(retryCtx, "unix", c.ControlSocketPath)
-		if err == nil {
-			return connection, nil
 		}
 	}
 }
@@ -168,7 +172,7 @@ func (c Client) request(ctx context.Context, transactionID string, command isReq
 		connection, err = c.dial(ctx)
 	}
 	if err != nil {
-		return nil, transportError{cause: dialError{cause: fmt.Errorf("dial PageBroker: %w", err)}}
+		return nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err), dial: true}
 	}
 	defer connection.Close()
 	return exchange(ctx, connection.(*net.UnixConn), transactionID, command)
