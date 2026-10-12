@@ -185,10 +185,12 @@ cluster_up() {
   fi
 
   # The directory is created by whoever runs this script and is then the
-  # checkpoint PVC inside the node. The agent writes to it as privileged root,
-  # but the PageBroker sidecar runs as root with every capability dropped, so
-  # without CAP_DAC_OVERRIDE it cannot create directories in a tree owned by
-  # another user. Make it world-writable, as a dynamic provisioner would.
+  # checkpoint PVC inside the node. Both the agent and PageBroker containers
+  # run privileged as root, but this host directory crosses the bind-mount
+  # boundary from the host into the k3d node and then into the pod; a root
+  # mkdir inside the pod does not reliably get write access across those
+  # boundaries. Make it world-writable, as a dynamic hostPath provisioner does
+  # for the volumes it hands out.
   mkdir -p "${HOST_CHECKPOINTS}"
   chmod 1777 "${HOST_CHECKPOINTS}"
   create_cluster
