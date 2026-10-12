@@ -125,10 +125,10 @@ sequenceDiagram
     participant PB as Node PageBroker
     participant S3 as S3-compatible store
     participant API as Kubernetes API
-    Agent->>API: Cached read of content (store binding, not deleting)
+    Agent->>API: Read of content (store binding, not deleting)
     Agent->>PB: Prepare(storeID, artifactUID, container)
     PB->>S3: Preflight destination access
-    PB-->>Agent: Transaction opened (2h05m lifetime)
+    PB-->>Agent: Transaction opened
     Agent->>Agent: CUDA then CRIU capture into shared staging
     Agent->>PB: Commit
     PB->>S3: Upload payload objects
@@ -143,6 +143,8 @@ sequenceDiagram
         PB-->>Agent: TRANSACTION_EXPIRED, unconfirmed objects left for sweep
     end
 ```
+
+**Restore flow**
 
 ```mermaid
 sequenceDiagram
@@ -168,6 +170,8 @@ sequenceDiagram
         PB->>PB: Transaction expiry reclaims staging
     end
 ```
+
+**Cleanup flow**
 
 ```mermaid
 sequenceDiagram
@@ -205,22 +209,18 @@ downloads/verifies the full bundle → CRIU/CUDA restore → unmount → Commit 
 Once fully staged, restore needs no further S3 reads. The later executor
 compatibility gate still runs before process restore.
 
-**Cleanup:** once a `PodSnapshotContent` has a deletion timestamp, no new operation
-may start on it: no checkpoint writing into it and no restore reading from it.
-Creating a new `PodSnapshot` is unaffected; it gets its own content. The reconciler
-enqueues `delete-content`, and a periodic tick enqueues `sweep`. The worker rereads
-ownership, deletes the artifact under the bound store and removes the finalizer.
-Anything short of confirmed deletion keeps the finalizer and retries. Deletion is
-immediate on both backends; what that means for S3 is described once under
+**Cleanup:** the existing maintenance flows, with one change each in what the
+backend does. `delete-content` deletes the objects under `artifacts/<artifactUID>/`
+in the bound store instead of removing a directory. `sweep` lists artifact UIDs
+under the store prefix instead of directories. Deletion timestamp handling,
+ownership recheck, finalizer and requeue are unchanged; see
 [Maintenance](#maintenance).
 
-**Agent loss after publication:** the checkpoint was published but the agent died
-before writing the descriptor into status. When the agent comes back it asks
-PageBroker for the index at the fixed key for that content and container. Present
-and naming the same store, content UID and container: the agent writes the
-descriptor and marks the content Ready. Absent: the capture is failed, and a new
-capture is a new content with a new UID. The operator never reads the bucket for
-this; the probe goes through PageBroker like every other agent access.
+**Agent loss after publication:** if the agent dies after PageBroker published but
+before status was written, the restarted agent asks PageBroker whether the index
+exists at the fixed key for that content and container. If it exists and names this
+store, content and container, the agent writes the descriptor and marks the content
+Ready. If not, the capture failed and a new capture gets a new content.
 
 ### Limitations, Risks, and Mitigations
 
@@ -544,9 +544,6 @@ before deletion; protect against arbitrary paths and symlinks. Grant the
 operator's service account only the storage permissions needed for cleanup and
 metadata repair, without GPU or host-process access.
 
-Enable provider-side encryption at rest on the bucket; Snapshot does not check
-or enforce it.
-
 ### Configuration
 
 PVC remains the default. `storage.type` already selects the maintenance backend;
@@ -584,13 +581,14 @@ storage:
 ```
 
 The chart renders the non-secret part into the storage ConfigMap, which the
-operator and PageBroker decode into the shared `api/storage` configuration:
+operator and PageBroker decode into the shared `api/storage` configuration. The
+populated block selects the backend; two blocks or none is a configuration error.
+The chart's existing `storage.type` key only picks which block to render:
 
 ```go
 type Config struct {
-    Type string `json:"type"` // pvc | s3
-    PVC  *PVC   `json:"pvc,omitempty"`
-    S3   *S3    `json:"s3,omitempty"`
+    PVC *PVC `json:"pvc,omitempty"` // Exactly one of PVC or S3 is set
+    S3  *S3  `json:"s3,omitempty"`
 }
 
 // S3 is the S3 API configuration. Endpoint selects the store; empty means AWS.
@@ -614,8 +612,6 @@ struct; they come from the projected Secret files.
   PVC mode, the operator manager mounts the shared claim directly.
 - Configure the maintenance worker pool size, per-task timeout and retry backoff on
   the operator manager itself.
-- The 2h05m PageBroker transaction lifetime is a constant and is not configurable.
-  Neither backend has a deletion delay.
 - Match Snapshot/PageBroker image versions. PageBroker reads mounted configuration
   and has no Kubernetes client.
 
