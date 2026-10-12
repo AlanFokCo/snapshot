@@ -12,7 +12,7 @@ var errMessageTooLarge = fmt.Errorf("message exceeds %d bytes", maxMessageSize)
 
 // transportError wraps a connection or I/O failure, as opposed to one
 // PageBroker itself reported. A dial failure is marked separately: unlike
-// a mid-exchange failure, it never reached PageBroker.
+// a mid-exchange failure, the request never reached PageBroker.
 type transportError struct {
 	cause error
 	dial  bool
@@ -22,18 +22,12 @@ func (e transportError) Error() string { return e.cause.Error() }
 
 func (e transportError) Unwrap() error { return e.cause }
 
-func isTransportError(err error) bool {
-	var transport transportError
-	return errors.As(err, &transport)
-}
-
-// isRetryableTransportError reports a transport failure Commit should retry: an
-// exchange whose outcome is unknown because the connection broke mid-request. A
-// dial failure is never retryable here; dial already retried the transient
-// cases itself, so what reaches this check is either a permanent error or a
-// transient one that exhausted its own budget.
+// isRetryableTransportError reports a transport failure Commit should retry.
+// Commit retries failed exchanges whose outcome is unknown. Client.dial
+// handles connection retries.
 func isRetryableTransportError(err error) bool {
-	return isTransportError(err) && !IsDialError(err)
+	var transport transportError
+	return errors.As(err, &transport) && !transport.dial
 }
 
 // IsDialError reports whether err came from failing to connect to PageBroker,
