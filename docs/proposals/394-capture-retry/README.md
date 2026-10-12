@@ -25,13 +25,10 @@ SPDX-License-Identifier: Apache-2.0
   - [Protecting the node agent](#protecting-the-node-agent)
   - [Storage cleanup](#storage-cleanup)
   - [API](#api)
-  - [Security](#security)
-  - [Configuration](#configuration)
   - [Performance and Scalability](#performance-and-scalability)
   - [Monitoring](#monitoring)
   - [Dependencies](#dependencies)
   - [Test Plan](#test-plan)
-    - [Measured behaviour](#measured-behaviour)
   - [Graduation Criteria](#graduation-criteria)
 - [Appendix](#appendix)
 <!-- /toc -->
@@ -96,25 +93,19 @@ of #319.
 1. **Restarting the source pod.** No second source Job, `PodSnapshot`, or
    `PodSnapshotContent` is created. Every recovery acts on the pod already named
    by `PodSnapshotContent.spec.source.podRef`.
-2. **Keeping the source alive past a successful dump.** The dump still
-   terminates the workload, so a capture whose data is lost after the dump
-   succeeded is not recoverable.
-3. **Surviving a node-agent restart.** An attempt in flight when the agent dies
+2. **Surviving a node-agent restart.** An attempt in flight when the agent dies
    is not resumed; the work order fails through the existing content resync and
    capture-lease expiry. Keeping the agent alive is goal 6; resuming across its
    death is not.
-4. **Telling the workload that no checkpoint is coming.** The other half of
+3. **Telling the workload that no checkpoint is coming.** The other half of
    #319. It changes the workload contract rather than the agent's capture path.
-5. **Moving publish retry into PageBroker.** The agent owns the retry; the
-   broker's contract is unchanged.
-6. **Restore-path retry or cold-start fallback** (#247, #244). Setting names are
+4. **Restore-path retry or cold-start fallback** (#247, #244). Setting names are
    aligned with #247 so the two read as a pair, but the mechanisms are separate.
 
 ## Proposal
 
 A capture runs four steps: **stage** a destination, **suspend** the workload's
-GPU state, **dump** the process, and **store** the result. The dump terminates
-the workload by design, so what a failure leaves behind depends entirely on
+GPU state, **dump** the process, and **store** the result. What a failure leaves behind depends entirely on
 where it happened.
 
 When an attempt fails, the agent reads the workload's actual state and takes
@@ -136,7 +127,7 @@ cannot start from; deciding between the two is
 [the dumpability check](#whether-a-failed-dump-can-simply-be-retried).
 
 Anything else ends the capture immediately with a reason naming the cause.
-Retries continue while the configured limit allows, and a capture that uses up
+Retries continue while the configured time limit allows, and a capture that uses up
 its retries reports that distinctly from one that failed on the first try.
 
 ### User Stories
@@ -221,12 +212,12 @@ on; what happens to the workload is now the probe's decision.
 
 By the time a dump runs, the suspend has already moved the workload's GPU
 memory to host memory — the expensive step. So after a dump fails the agent
-needs the answer to one question: **can CRIU dump this process again as it
+needs to answer one question: **can CRIU dump this process again as it
 stands?** If it can, the retry costs only the dump. If it cannot, the workload
-has to be put back to running and suspended afresh, paying that GPU transfer a
+has to be put back to running and suspended a fresh, paying that GPU transfer a
 second time.
 
-The answer can be no because dumping is invasive. To dump a process tree CRIU
+The answer can be 'no' because dumping is invasive. To dump a process tree CRIU
 `ptrace`-attaches to every task in it — *seizing* it — and injects a small blob
 of code, the *parasite*, which runs inside the process to read out its own
 memory. CRIU undoes both when it finishes, on success and on failure alike. But
@@ -249,11 +240,7 @@ attached, and that the tree is the one it suspended:
   tree is not the one the dump was meant to capture.
 
 When all four hold, the process is exactly what it was before CRIU touched it,
-and the agent dumps again without disturbing the GPU state. Measurement shows
-this is the normal outcome: after a failed dump the workload read task state
-`S`, `TracerPid` `0`, an unchanged thread count and `checkpointed` GPU state —
-indistinguishable from one that had only ever been suspended
-([Test Plan](#test-plan)).
+and the agent dumps again without disturbing the GPU state.
 
 When any of them does not hold, the workload cannot be dumped as it stands, but
 it is not lost. Reviving it and suspending again produces a clean starting
@@ -265,10 +252,6 @@ GPU checkpointing is a reversible state machine: `lock` blocks new GPU work,
 `checkpoint` moves GPU memory to host memory, and `restore` and `unlock` undo
 them. Reviving in place needs no device remapping, because the workload is
 being handed back the GPUs it still holds.
-
-Revival must dispatch **per process**, because a failed suspend leaves a mixed
-tree — the agent locks every process and then checkpoints every process, so a
-failure in between leaves some `checkpointed` and some only `locked`:
 
 | Probed state | Action |
 | --- | --- |
@@ -386,43 +369,7 @@ change.
 by the Helm chart ([Configuration](#configuration)).
 
 **Per-capture value** — an optional field on `PodSnapshot.spec`, the object that
-represents a capture request. It follows the path every other capture parameter
-already takes: a caller creating a `PodSnapshot` sets it directly; `SnapshotJob`
-exposes it on `spec.podSnapshotTemplate` alongside `targetContainers` and copies
-it into the `PodSnapshot` it creates; and the `PodSnapshotReconciler` copies it
-into `PodSnapshotContent.spec`, where the agent already reads the work order.
-Both specs stay immutable, since the value is set at creation. An out-of-range
-value is rejected by CRD validation at admission.
-
-One choice for review: whether an operator should be able to cap what a caller
-may request.
-
-### Security
-
-Revival uses capabilities the agent already exercises on the capture and
-restore paths, and artifact paths, ownership, and cleanup are unchanged.
-
-The proposal's main security effect is an improvement to **tenant isolation**.
-The node agent is shared by every workload on its node, and today a single
-capture request can terminate it by panic or by memory exhaustion, denying
-service to unrelated tenants. Both are closed, so the blast radius of one
-tenant's bad request becomes one failed capture.
-
-Two smaller considerations:
-
-- **Failure detail reaching the API.** Panic recovery and failure
-  classification produce diagnostics that could include internal paths or stack
-  traces. Conditions and events carry a bounded message; full traces stay in
-  agent logs, which are already operator-scoped.
-- **Resource holding, and who may extend it.** Because the retry limit is
-  settable per capture, a caller can lengthen its own hold on shared GPUs and
-  staging. Whether operators should be able to cap that is the open question in
-  [API](#api).
-
-### Configuration
-
-**The retry limit is the only setting** — how many further attempts may follow
-the first.
+represents a capture request.
 
 The agent reads the per-capture value; absent, it uses the cluster default.
 Absent is distinct from zero: zero means the caller explicitly wants no
@@ -444,11 +391,6 @@ only after a failure.
 A failing capture becomes slower by design, and its workload and GPUs stay
 occupied for that duration — the explicit trade against re-reaching a ready
 workload from scratch.
-
-Dumping again without reviving is what keeps the common retry cheap. Suspending
-and reviving GPU state each move the workload's full GPU footprint across the
-PCIe bus, so avoiding both saves roughly twice that transfer. The saving scales
-with the workload's GPU footprint, not with the number of retries.
 
 Node memory is the scarce resource. Staging is memory-backed and shared by both
 containers in the agent pod, so a retry that failed to release its
@@ -506,31 +448,6 @@ succeeds on retry, one that exhausts its retries, and one hitting an
 immediate-failure classification, each asserting the resulting conditions and
 events. That the artifact destination stays empty until a genuine commit is
 asserted directly, since same-destination retry depends on it.
-
-#### Measured behaviour
-
-Measured on a single-node GPU cluster (4× T4, driver 595.71.05, kernel
-7.0.0-1014-aws, CRIU 4.2.1) against a workload holding 256 MiB on-device and
-re-checksumming it on the GPU every beat, so a recovered workload has to launch
-kernels and return correct data rather than merely exist.
-
-| Question | Result |
-| --- | --- |
-| Does a failed dump leave the tree alive? | Yes — before and after the freeze. CRIU unfreezes and unseizes as part of failing. |
-| Does a failed dump leave anything attached? | No. Task state `S`, `TracerPid` 0, thread count unchanged, GPU state `checkpointed` — identical to a clean suspend. |
-| Does the agent kill the source after a failure? | Yes, within 12 ms — which is why that kill is removed. |
-| Can a suspended workload be revived? | Yes. Full cycle repeated with **0 checksum mismatches** and GPU memory retained. |
-| Can a revived workload be captured again? | Yes — it re-enters the suspend state machine cleanly. |
-| Does per-process dispatch matter? | Yes. Restoring a `locked` process returns `CUDA_ERROR_ILLEGAL_STATE`; the existing helper then returns before unlocking, leaving every process locked. |
-| Does a staging `sizeLimit` contain an oversized capture? | Yes. The dump failed with `ENOSPC` mid-write and the agent survived with 0 restarts. |
-| What does suspend/revive cost? | ~300 ms suspend, ~220 ms revive per 256 MiB — roughly 2 GB/s each way. |
-
-**Not yet shown:** a successful capture *after* a failed dump through the
-production agent, which requires the kill above to be removed — the change this
-proposal makes. End-to-end coverage therefore closes with induced transient
-failures for each recovery against the framework workloads already used by the
-suite, asserting the capture succeeds on retry and that a retried capture
-produces an artifact indistinguishable from a first-attempt one.
 
 ### Graduation Criteria
 
