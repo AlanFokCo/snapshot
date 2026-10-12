@@ -550,10 +550,8 @@ before deletion; protect against arbitrary paths and symlinks. Grant the
 operator's service account only the storage permissions needed for cleanup and
 metadata repair, without GPU or host-process access.
 
-Require encryption at rest for every checkpoint artifact — SSE-S3, SSE-KMS or
-an equivalent provider guarantee. Installation fails validation if the
-configured provider/bucket cannot demonstrate it. TLS covers transit only; this
-is a separate, mandatory requirement before S3 is enabled.
+Enable provider-side encryption at rest on the bucket; Snapshot does not check
+or enforce it.
 
 ### Configuration
 
