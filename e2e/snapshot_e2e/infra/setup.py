@@ -18,6 +18,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Callable
 
 import yaml
@@ -39,6 +40,7 @@ DEFAULT_STORAGE_CLASS = ""
 DEFAULT_VCLUSTER_K8S_VERSION = "v1.32.13"
 DEFAULT_VCLUSTER_LOCAL_PORT = 8443
 DEFAULT_HELM_TIMEOUT = "6m"
+DEFAULT_CHART = "./charts/snapshot"
 DEFAULT_READY_TIMEOUT_SECONDS = 900
 PROGRESS_INTERVAL_SECONDS = 30
 
@@ -159,6 +161,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Operator and agent image tag for the Snapshot chart.",
     )
     parser.add_argument(
+        "--chart-ref",
+        default=os.environ.get("SNAPSHOT_E2E_CHART_REF") or DEFAULT_CHART,
+        help=f"Snapshot chart to install: a local path or an oci:// reference. Default: {DEFAULT_CHART}.",
+    )
+    parser.add_argument(
+        "--chart-version",
+        default=os.environ.get("SNAPSHOT_E2E_CHART_VERSION") or None,
+        help="Chart version for an oci:// --chart-ref, e.g. 0.1.0. Default: none.",
+    )
+    parser.add_argument(
         "--pvc-name",
         default=os.environ.get("SNAPSHOT_E2E_PVC_NAME", DEFAULT_PVC_NAME),
         help=f"Checkpoint PVC name. Default: {DEFAULT_PVC_NAME}.",
@@ -221,6 +233,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--result-file",
         default=os.environ.get("SNAPSHOT_E2E_RESULT_FILE"),
         help="Optional JSON file to write setup outputs.",
+    )
+    parser.add_argument(
+        "--helm-set",
+        action="append",
+        metavar="KEY=VALUE",
+        help=(
+            "Extra Helm --set assignment for the Snapshot chart, repeatable. "
+            "Applied after the defaults, so it can override them. Falls back to "
+            "SNAPSHOT_E2E_HELM_SET, one assignment per line."
+        ),
     )
     parser.add_argument(
         "--skip-host-preflight",
@@ -350,6 +372,11 @@ def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> N
         image_tag=args.snapshot_tag,
         pvc_name=args.pvc_name,
         timeout=args.helm_timeout,
+        chart=args.chart_ref,
+        chart_version=args.chart_version,
+        helm_overrides=parse_helm_overrides(
+            args.helm_set, os.environ.get("SNAPSHOT_E2E_HELM_SET")
+        ),
     )
 
 
@@ -860,6 +887,83 @@ def ensure_checkpoint_pvc(
         log(f"PVC {namespace}/{name} already exists: {detail}")
 
 
+def parse_helm_overrides(
+    values: Sequence[str] | None, env_value: str | None = None
+) -> list[str]:
+    """Validate extra Helm --set assignments.
+
+    CLI flags win over the newline-separated environment fallback. Assignments
+    reach helm verbatim, so they follow helm's own --set syntax: a comma starts
+    the next assignment unless it is escaped as `\\,`.
+    """
+    raw = list(values) if values else (env_value or "").splitlines()
+    overrides = []
+    for item in raw:
+        entry = item.strip()
+        if not entry:
+            continue
+        key, separator, _ = entry.partition("=")
+        if not separator or not key:
+            raise SetupError(f"--helm-set expects KEY=VALUE, got {entry!r}")
+        overrides.append(entry)
+    return overrides
+
+
+def snapshot_chart_command(
+    *,
+    namespace: str,
+    release: str,
+    image_tag: str,
+    pvc_name: str,
+    timeout: str,
+    chart: str = DEFAULT_CHART,
+    chart_version: str | None = None,
+    operator_tag: str | None = None,
+    agent_tag: str | None = None,
+    reset_then_reuse_values: bool = False,
+    helm_overrides: Sequence[str] = (),
+) -> list[str]:
+    command = [
+        "helm",
+        "upgrade",
+        "--install",
+        release,
+        chart,
+        "--namespace",
+        namespace,
+        "--create-namespace",
+        "--timeout",
+        timeout,
+    ]
+    if chart_version:
+        command += ["--version", chart_version]
+    if reset_then_reuse_values:
+        command.append("--reset-then-reuse-values")
+    command += [
+        "--set",
+        f"image.operator.tag={operator_tag or image_tag}",
+        "--set",
+        f"image.agent.tag={agent_tag or image_tag}",
+    ]
+    if not reset_then_reuse_values:
+        command += [
+            "--set",
+            "storage.pvc.create=false",
+            "--set",
+            f"storage.pvc.name={pvc_name}",
+            "--set",
+            "operator.artifactCleanup.scanInterval=5s",
+            "--set-json",
+            "daemonset.imagePullSecrets=[]",
+        ]
+    # Appended last so a caller can override any of the defaults above. Clusters
+    # without published images need this for image repositories, pull policy,
+    # and the container runtime paths.
+    for override in helm_overrides:
+        command.extend(["--set", override])
+    return command
+
+
 def install_snapshot_chart(
     *,
     kubeconfig: str | None,
@@ -868,32 +972,28 @@ def install_snapshot_chart(
     image_tag: str,
     pvc_name: str,
     timeout: str,
+    chart: str = DEFAULT_CHART,
+    chart_version: str | None = None,
+    operator_tag: str | None = None,
+    agent_tag: str | None = None,
+    reset_then_reuse_values: bool = False,
+    helm_overrides: Sequence[str] = (),
 ) -> None:
-    log(f"Installing Snapshot chart release {namespace}/{release}")
-    command = [
-        "helm",
-        "upgrade",
-        "--install",
-        release,
-        "./charts/snapshot",
-        "--namespace",
-        namespace,
-        "--create-namespace",
-        "--timeout",
-        timeout,
-        "--set",
-        f"image.operator.tag={image_tag}",
-        "--set",
-        f"image.agent.tag={image_tag}",
-        "--set",
-        "storage.pvc.create=false",
-        "--set",
-        f"storage.pvc.name={pvc_name}",
-        "--set",
-        "operator.artifactCleanup.scanInterval=5s",
-        "--set-json",
-        "daemonset.imagePullSecrets=[]",
-    ]
+    source = f"{chart} {chart_version}" if chart_version else chart
+    log(f"Installing Snapshot chart release {namespace}/{release} from {source}")
+    command = snapshot_chart_command(
+        namespace=namespace,
+        release=release,
+        image_tag=image_tag,
+        pvc_name=pvc_name,
+        timeout=timeout,
+        chart=chart,
+        chart_version=chart_version,
+        operator_tag=operator_tag,
+        agent_tag=agent_tag,
+        reset_then_reuse_values=reset_then_reuse_values,
+        helm_overrides=helm_overrides,
+    )
     env = os.environ.copy()
     if kubeconfig:
         env["KUBECONFIG"] = kubeconfig

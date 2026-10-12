@@ -213,7 +213,6 @@ func TestReconcileRestorePodLeavesARefusedPodAlone(t *testing.T) {
 	assert.Empty(t, r.comparison.calls, "already refused restore was compared again")
 	assert.Empty(t, r.events(t, podcontract.RestoreReasonIncompatible), "already refused restore was refused again")
 	assert.Len(t, r.events(t, restoreAlreadyFailedReason), 1)
-	assert.Empty(t, r.controller.inFlight, "already refused restore claimed an attempt")
 }
 
 // The escape hatches: with either one set, neither gate runs, so a checkpoint
@@ -224,8 +223,8 @@ func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
 	// Lets the restore start and end quickly, since the point here is only
 	// whether the gate let it through.
 	stopEarly := func(r *gatedRestore) {
-		r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
-			return 0, errors.New("test restore stopped")
+		r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+			return executor.RestoreResult{}, errors.New("test restore stopped")
 		}
 	}
 
@@ -280,9 +279,9 @@ func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
 				r := newGatedRestore(t)
 				tc.set(r)
 				var requested executor.RestoreRequest
-				r.controller.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
+				r.controller.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
 					requested = req
-					return 0, errors.New("test restore stopped")
+					return executor.RestoreResult{}, errors.New("test restore stopped")
 				}
 
 				r.reconcile(t)
@@ -357,7 +356,7 @@ func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
 	rt := &fakeRuntime{}
 	r.controller.runtime = rt
 	sentinels := 0
-	r.controller.writeControlSentinelFn = func(int, string) error {
+	r.controller.writeControlSentinelFn = func(int, string, []byte) error {
 		sentinels++
 		return nil
 	}
@@ -367,7 +366,7 @@ func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
 
 	assert.False(t, requeue, "a refusal asked to be driven again")
 	assert.Empty(t, r.events(t, podcontract.RestoreReasonFailed), "refusal reported itself as a restore failure")
-	assert.Zero(t, sentinels, "refusal released the workload")
+	assert.Zero(t, sentinels, "refusal wrote restore-complete or restore-failed")
 	assert.Empty(t, rt.resolvedContainerIDs, "refusal reached the placeholder kill path")
 }
 
@@ -375,21 +374,20 @@ func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
 // leaves no in-flight entry and no restore worker behind.
 func TestReconcileRestorePodRefusesBeforeEnteringRestore(t *testing.T) {
 	r := newGatedRestore(t, compat.Mismatch{Check: "memory-limit", Source: "32Gi", Target: "1Gi"})
-	r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+	r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
 		t.Error("a refused restore was entered")
-		return 0, nil
+		return executor.RestoreResult{}, nil
 	}
 
 	r.reconcile(t)
 
 	assert.Len(t, r.comparison.calls, 1)
 	assert.Empty(t, r.events(t, restoreRequestedReason), "refused restore still announced a request")
-	assert.Empty(t, r.controller.inFlight, "refused restore claimed an attempt")
 }
 
-func refuseWith(mismatches ...compat.Mismatch) func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
-	return func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
-		return 0, compat.NewIncompatibleError(compat.GateInspect, mismatches)
+func refuseWith(mismatches ...compat.Mismatch) func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+	return func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+		return executor.RestoreResult{}, compat.NewIncompatibleError(compat.GateInspect, mismatches)
 	}
 }
 

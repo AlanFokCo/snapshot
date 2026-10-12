@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
+	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
@@ -51,6 +52,31 @@ func TestGPUMountAliasesLeavesOldCheckpointsUnchanged(t *testing.T) {
 	got, err := GPUMountAliases(m, "", nil)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("old checkpoint aliases = %v, %v", got, err)
+	}
+}
+
+func TestGPUDeviceMountsWithoutAliases(t *testing.T) {
+	m, err := PrepareGPUDeviceMounts(nil, logr.Discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RestoreNativePaths(-1); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Close(true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGPUDeviceMountsRejectInvalidPaths(t *testing.T) {
+	for _, aliases := range []map[string]string{
+		{"/dev/nvidia0": "/dev/null"},
+		{"/tmp/nvidia0": "/dev/nvidia1"},
+	} {
+		if m, err := PrepareGPUDeviceMounts(aliases, logr.Discard()); err == nil {
+			_ = m.Close(false)
+			t.Fatal("accepted an invalid GPU path")
+		}
 	}
 }
 
@@ -330,4 +356,29 @@ func TestBuildRestoreExtMounts(t *testing.T) {
 			t.Error("expected error for empty ExtMnt")
 		}
 	})
+}
+
+func TestRestorePreservesManifestImageIoMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want criurpc.CriuImageIoMode
+	}{
+		{"", criurpc.CriuImageIoMode_IMAGE_IO_DIRECT},
+		{"direct", criurpc.CriuImageIoMode_IMAGE_IO_DIRECT},
+		{"writeback", criurpc.CriuImageIoMode_IMAGE_IO_WRITEBACK},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			manifest := &types.CheckpointManifest{CRIUDump: types.CRIUDumpManifest{
+				CRIU:   types.CRIUSettings{ImageIoMode: tc.mode},
+				ExtMnt: map[string]string{"root": "/"},
+			}}
+			opts, err := BuildRestoreOpts(manifest, t.TempDir(), "", logr.Discard())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opts.GetImageIoMode() != tc.want {
+				t.Fatalf("restore I/O mode = %v, want %v", opts.GetImageIoMode(), tc.want)
+			}
+		})
+	}
 }

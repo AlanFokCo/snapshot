@@ -171,7 +171,7 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 	if err != nil {
 		return nil, err
 	}
-	return gpuUUIDsOf(env), nil
+	return GPUUUIDs(env), nil
 }
 
 // DiscoverGPUs resolves the same GPUs as DiscoverGPUUUIDs, in the same
@@ -241,7 +241,7 @@ func discoverGPUs(
 				err,
 			)
 		}
-		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, gpuUUIDsOf(visible))
+		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, GPUUUIDs(visible))
 		if err != nil {
 			return compat.GPUInfo{}, err
 		}
@@ -275,7 +275,7 @@ func discoverGPUs(
 	if err != nil {
 		return compat.GPUInfo{}, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
 	}
-	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", gpuUUIDsOf(visible))
+	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", GPUUUIDs(visible))
 	return visible, nil
 }
 
@@ -301,7 +301,8 @@ func describeGPUs(uuids []string, visible compat.GPUInfo) compat.GPUInfo {
 	return env
 }
 
-func gpuUUIDsOf(env compat.GPUInfo) []string {
+// GPUUUIDs returns device UUIDs in discovery order.
+func GPUUUIDs(env compat.GPUInfo) []string {
 	var uuids []string
 	for _, device := range env.Devices {
 		if device.UUID != "" {
@@ -355,11 +356,12 @@ func orderDRAUUIDsByRuntime(allocatedUUIDs, visibleUUIDs []string) ([]string, er
 	return append([]string(nil), visibleUUIDs...), nil
 }
 
-// FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
+// FilterProcesses returns the candidate PIDs with a CUDA driver restore thread.
+// Driver initialization can create that thread without a cuInterpose core runtime.
 // Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
 // --get-state, because --get-state incorrectly matches coordinator processes like
 // cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
-// don't hold CUDA contexts themselves.
+// do not have their own CUDA driver restore thread.
 func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int {
 	cudaPIDs := make([]int, 0, len(allPIDs))
 	for _, pid := range allPIDs {
@@ -474,9 +476,10 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 	return timings, nil
 }
 
-// RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-// helperBinaryPath must be the absolute path to cuda-checkpoint-helper: DefaultHelperBinaryPath
-// on the agent, or filepath.Join(bundleDir, HelperBinaryName) inside the placeholder namespace.
+// RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs. It
+// runs inside nsrestore and shares its process group so cancellation reaches the CUDA
+// helper. helperBinaryPath identifies the binary in that namespace, including through
+// an inherited descriptor opened before CRIU restores the workload filesystem.
 func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, log logr.Logger) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
 

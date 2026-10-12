@@ -10,16 +10,20 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"runtime"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
 	// PageBroker control requests and responses are limited to 64 KiB.
-	maxMessageSize   = 64 << 10
-	commitRetryDelay = 100 * time.Millisecond
+	maxMessageSize    = 64 << 10
+	messageHeaderSize = 4
+	commitRetryDelay  = 100 * time.Millisecond
 )
 
 var (
@@ -50,6 +54,31 @@ func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destinatio
 		return "", err
 	}
 	return imageDirectory(response.GetStagedCheckpointDirectory().GetImageDirectory())
+}
+
+// DirectRestore prepares a transaction against the original checkpoint directory.
+// The caller must keep its contents available until Commit or Abort.
+func (c Client) DirectRestore(ctx context.Context, transactionID, source string) error {
+	response, err := c.request(ctx, transactionID, &Request_DirectRestore{
+		DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
+	})
+	if err != nil {
+		return err
+	}
+	if response.GetDirectRestoreReady() == nil {
+		return fmt.Errorf("unexpected PageBroker direct restore response")
+	}
+	return nil
+}
+
+func (c Client) PrepareDirectCheckpoint(ctx context.Context, transactionID, destination string) (string, error) {
+	response, err := c.request(ctx, transactionID, &Request_PrepareDirectCheckpoint{
+		PrepareDirectCheckpoint: &PrepareDirectCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},
+	})
+	if err != nil {
+		return "", err
+	}
+	return imageDirectory(response.GetDirectCheckpointDirectory().GetImageDirectory())
 }
 
 func imageDirectory(directory string) (string, error) {
@@ -115,16 +144,26 @@ func (c Client) request(ctx context.Context, transactionID string, command isReq
 		return nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
 	}
 	defer connection.Close()
-	stopCancel := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	return exchange(ctx, connection.(*net.UnixConn), transactionID, command)
+}
+
+func exchange(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = connection.CloseWrite()
+		_ = connection.Close()
+	})
 	defer stopCancel()
 
 	requestID := uuid.NewString()
-	request := &Request{RequestId: &requestID, TransactionId: &transactionID, Command: command}
+	request := &Request{RequestId: &requestID, Command: command}
+	if transactionID != "" {
+		request.TransactionId = &transactionID
+	}
 	message, err := proto.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("marshal PageBroker request: %w", err)
 	}
-	if err := writeMessage(connection, message); err != nil {
+	if err := writeRequest(connection, message, files); err != nil {
 		return nil, transportError{cause: fmt.Errorf("write PageBroker request: %w", err)}
 	}
 	message, err = readMessage(connection)
@@ -155,7 +194,7 @@ type failureError struct {
 func failureCode(code Failure_Code) Failure_Code {
 	switch code {
 	case Failure_UNSPECIFIED, Failure_INVALID_REQUEST, Failure_TRANSACTION_NOT_FOUND, Failure_TRANSACTION_CONFLICT,
-		Failure_INSUFFICIENT_STORAGE, Failure_STORAGE_ERROR, Failure_INTERNAL_ERROR:
+		Failure_INSUFFICIENT_STORAGE, Failure_STORAGE_ERROR, Failure_INTERNAL_ERROR, Failure_UNAVAILABLE:
 		return code
 	default:
 		return Failure_UNSPECIFIED
@@ -180,6 +219,41 @@ func filesystem(directory string) *StorageBackend {
 
 func posixCopy() *IOEngine {
 	return &IOEngine{Kind: &IOEngine_PosixCopy{PosixCopy: &PosixCopyIOEngine{}}}
+}
+
+// Linux permits at most 253 descriptors in one SCM_RIGHTS message.
+const maxPassedFiles = 253
+
+func writeRequest(connection *net.UnixConn, message []byte, files []*os.File) error {
+	if len(files) == 0 {
+		return writeMessage(connection, message)
+	}
+	if len(message) > maxMessageSize || len(files) > maxPassedFiles {
+		return fmt.Errorf("PageBroker request exceeds message or descriptor limit")
+	}
+	descriptors := make([]int, len(files))
+	for i, file := range files {
+		if file == nil {
+			return fmt.Errorf("missing GPU target descriptor %d", i)
+		}
+		descriptors[i] = int(file.Fd())
+	}
+	header := make([]byte, messageHeaderSize)
+	binary.BigEndian.PutUint32(header, uint32(len(message)))
+	rights := unix.UnixRights(descriptors...)
+	written, controlWritten, err := connection.WriteMsgUnix(header, rights, nil)
+	runtime.KeepAlive(files)
+	if err != nil {
+		return err
+	}
+	if controlWritten != len(rights) || written == 0 {
+		return io.ErrShortWrite
+	}
+	if _, err := connection.Write(header[written:]); err != nil {
+		return err
+	}
+	_, err = connection.Write(message)
+	return err
 }
 
 func writeMessage(writer io.Writer, message []byte) error {

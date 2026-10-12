@@ -13,6 +13,11 @@ image:
     # Defaults to the chart's appVersion when empty (see templates).
     tag: ""
     pullPolicy: Always
+  # The PageBroker sidecar always uses image.agent.tag: the two speak an
+  # internal protocol and ship as a pair.
+  pageBroker:
+    repository: ghcr.io/ai-dynamo/snapshot/pagebroker
+    pullPolicy: Always
 
 replicaCount: 1
 
@@ -25,13 +30,26 @@ operator:
       cpu: 50m
       memory: 64Mi
 
+  # Node selector for the operator pod
+  nodeSelector: {}
+
+  # Affinity rules for the operator pod
+  affinity: {}
+
+  # Tolerations for the operator pod
+  tolerations: []
+
   artifactCleanup:
-    # Frequency of authoritative orphan artifact scans.
+    # Frequency of pending finalizer recovery and authoritative orphan artifact scans.
     scanInterval: 10m
     # Maximum orphan roots removed serially in one scan.
     batchSize: 10
     # Total metadata-list attempts before a scan fails closed.
     listAttempts: 3
+    # Concurrent maintenance workers processing delete-content and sweep work items.
+    workers: 5
+    # Maximum time one work item may run before it is abandoned and retried.
+    taskTimeout: 10m
 
 # `helm upgrade` leaves CRDs alone by design; the crd-installer init container
 # closes that gap on every rollout, and is a no-op when nothing changed.
@@ -96,11 +114,26 @@ storage:
   oci:
     uri: ""
 
+# PageBroker owns CustomStorage CUDA calls and transfers in one process.
+# It handles every Pod unless the Pod sets nvidia.com/snapshot-pagebroker: "false".
+# CustomStorage also requires driver support.
 pageBroker:
-  enabled: false
+  enabled: true
+  # Restore directly from the checkpoint directory, or opt into a staged copy.
+  restoreMode: direct
   command: []
   args: []
   maxConcurrentRequests: 16
+  # Allocate and register the full ring before accepting GPU work.
+  # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.
+  transferBufferCount: 32
+  # 128 MiB per slot. Must be a positive multiple of 4096 bytes.
+  transferChunkBytes: 134217728
+  # Zero is uncapped. This limit includes CUDA allocation-granularity rounding.
+  maxPinnedBytes: 0
+  # Requires 32 GiB of free allocatable memory, plus the agent request.
+  # Override for each node profile. Budget 4 GiB per GPU plus process and staging
+  # overhead. A lower request does not reduce the pinned ring allocation.
   resources:
     requests:
       cpu: 8
@@ -108,11 +141,6 @@ pageBroker:
     limits:
       cpu: 32
       memory: 256Gi
-  image:
-    repository: ghcr.io/ai-dynamo/snapshot/agent
-    # Defaults to the chart's appVersion when empty (see templates).
-    tag: ""
-    pullPolicy: Always
 
 # DaemonSet configuration for the checkpoint/restore agent
 daemonset:
@@ -122,6 +150,12 @@ daemonset:
   # The shipped agent image is public on GHCR. Set this only when an image
   # override is hosted in a private registry.
   imagePullSecrets: []
+
+  # RuntimeClass for the agent pod. CUDA checkpoint/restore requires the NVIDIA
+  # container runtime, which the GPU Operator exposes as RuntimeClass "nvidia".
+  # Set to "" when the NVIDIA runtime is already containerd's default and no
+  # such RuntimeClass exists; the field is then left out of the pod spec.
+  runtimeClassName: nvidia
 
   # Resource limits and requests
   resources:
@@ -212,6 +246,10 @@ config:
       - "*/.cache/huggingface"
       - "*/__pycache__"
       - "*.pyc"
+
+  checkpoint:
+    # Maximum seconds before the agent marks a checkpoint failed.
+    checkpointTimeoutSeconds: 3600
 
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed
