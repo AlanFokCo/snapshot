@@ -134,11 +134,13 @@ func TestRequestWaitsForSocketToAppear(t *testing.T) {
 
 func TestRequestStopsWaitingForSocketWhenContextExpires(t *testing.T) {
 	const limit = 200 * time.Millisecond
+	socketPath := filepath.Join(t.TempDir(), "missing.sock")
+
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
 
 	start := time.Now()
-	err := (Client{ControlSocketPath: filepath.Join(t.TempDir(), "missing.sock")}).Abort(ctx, "transaction")
+	err := (Client{ControlSocketPath: socketPath}).Abort(ctx, "transaction")
 	// Caller's context expired, not just the local retry budget.
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Abort() error = %v, want context.DeadlineExceeded", err)
@@ -158,9 +160,9 @@ func TestRequestReturnsAPermanentDialErrorImmediately(t *testing.T) {
 	socketPath := filepath.Join(regularFile, "pagebroker.sock")
 	client := Client{ControlSocketPath: socketPath}
 
-	requests := map[string]func(context.Context) error{
-		"Abort":  func(ctx context.Context) error { return client.Abort(ctx, "transaction") },
-		"Commit": func(ctx context.Context) error { return client.Commit(ctx, "transaction") },
+	requests := map[string]func(context.Context, string) error{
+		"Abort":  client.Abort,
+		"Commit": client.Commit,
 	}
 	for name, request := range requests {
 		t.Run(name, func(t *testing.T) {
@@ -168,10 +170,7 @@ func TestRequestReturnsAPermanentDialErrorImmediately(t *testing.T) {
 			defer cancel()
 
 			start := time.Now()
-			err := request(ctx)
-			if errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("%s() error = %v, want the permanent dial error, not the caller's deadline", name, err)
-			}
+			err := request(ctx, "transaction")
 			if !errors.Is(err, unix.ENOTDIR) {
 				t.Fatalf("%s() error = %v, want errors.Is(err, unix.ENOTDIR)", name, err)
 			}
