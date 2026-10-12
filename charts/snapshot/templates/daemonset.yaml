@@ -38,11 +38,11 @@ spec:
         # custom SCC is added later. See openshift/enhancements custom-scc-preemption-prevention.
         # User-supplied podAnnotations cannot override this key.
         openshift.io/required-scc: privileged
-        {{- with omit .Values.daemonset.podAnnotations "openshift.io/required-scc" "kubectl.kubernetes.io/default-container" }}
+        {{- with omit (.Values.daemonset.podAnnotations | default dict) "openshift.io/required-scc" "kubectl.kubernetes.io/default-container" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- else }}
-        {{- with omit .Values.daemonset.podAnnotations "kubectl.kubernetes.io/default-container" }}
+        {{- with omit (.Values.daemonset.podAnnotations | default dict) "kubectl.kubernetes.io/default-container" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- end }}
