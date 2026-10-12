@@ -40,8 +40,26 @@ slug() {
         sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
 }
 
+# Portable: sha256sum on the runners, shasum on a developer's Mac.
+short_digest() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$1" | sha256sum | cut -c1-7
+    else
+        printf '%s' "$1" | shasum -a 256 | cut -c1-7
+    fi
+}
+
 branch_slug=$(slug "$BRANCH")
 branch_slug=${branch_slug:-branch}
+
+# A tag is capped at 128 characters and nothing stops a branch name being
+# longer than that, which would produce a reference buildx rejects -- failing
+# the release build rather than merely missing the cache. Truncate, and keep a
+# digest of the full name so two long branches sharing a prefix do not share a
+# cache.
+if [ "${#branch_slug}" -gt 32 ]; then
+    branch_slug="$(printf '%s' "$branch_slug" | cut -c1-24)-$(short_digest "$BRANCH")"
+fi
 
 ref="${CACHE_REF_PREFIX}:${IMAGE}-${branch_slug}${SUFFIX}"
 main_ref="${CACHE_REF_PREFIX}:${IMAGE}-main${SUFFIX}"
