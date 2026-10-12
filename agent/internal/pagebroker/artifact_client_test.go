@@ -208,7 +208,7 @@ func TestStorageFailuresRemainTypedAndAreNotRetried(t *testing.T) {
 	}
 }
 
-func TestOversizedFailureMessageIsProtocolError(t *testing.T) {
+func TestOversizedFailureMessageKeepsCode(t *testing.T) {
 	for _, code := range []Failure_Code{Failure_STORE_MISMATCH, Failure_ACCESS_DENIED, Failure_STORAGE_UNAVAILABLE,
 		Failure_ARTIFACT_NOT_FOUND, Failure_ARTIFACT_CORRUPT, Failure_UNSUPPORTED_ARTIFACT,
 		Failure_OUTCOME_UNKNOWN, Failure_TRANSACTION_EXPIRED} {
@@ -227,8 +227,11 @@ func TestOversizedFailureMessageIsProtocolError(t *testing.T) {
 		_, err := client.CommitCheckpoint(ctx, "tx")
 		cancel()
 		var failure *FailureError
-		if err == nil || errors.As(err, &failure) {
-			t.Fatalf("invalid failure accepted as typed broker result: %v", err)
+		if !errors.As(err, &failure) || failure.Code() != code {
+			t.Fatalf("classification lost for oversized message: %v", err)
+		}
+		if strings.Contains(err.Error(), message) {
+			t.Fatalf("oversized message was not replaced: %v", err)
 		}
 	}
 }

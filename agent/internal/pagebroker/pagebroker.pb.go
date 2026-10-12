@@ -49,7 +49,7 @@ const (
 	Failure_STORAGE_UNAVAILABLE  Failure_Code = 22 // Transient storage/transport failure after bounded retries.
 	Failure_ARTIFACT_NOT_FOUND   Failure_Code = 23 // Authoritative absence of the requested publication.
 	Failure_ARTIFACT_CORRUPT     Failure_Code = 24 // Invalid index, unsafe paths, missing indexed data or digest mismatch.
-	Failure_UNSUPPORTED_ARTIFACT Failure_Code = 25 // No reader for the backend/version pair.
+	Failure_UNSUPPORTED_ARTIFACT Failure_Code = 25 // No reader for the backend or the layout version recorded in the index.
 	Failure_OUTCOME_UNKNOWN      Failure_Code = 26 // Cannot establish publication outcome; never authorizes process replay.
 	Failure_TRANSACTION_EXPIRED  Failure_Code = 27 // Fixed transaction deadline elapsed; no new storage operations.
 )

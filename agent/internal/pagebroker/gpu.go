@@ -129,7 +129,9 @@ func (c Client) prepareGPUExecution(ctx context.Context, transactionID string, g
 	if gpuContext == nil {
 		return nil, nil, fmt.Errorf("CustomStorage execution requires GPU context")
 	}
-	response, brokerProcess, err := c.requestResponse(ctx, transactionID, &Request{Command: command, RequestBrokerPidfd: true})
+	request := newRequest(transactionID, command)
+	request.RequestBrokerPidfd = true
+	response, brokerProcess, err := c.requestResponse(ctx, request)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -279,7 +281,7 @@ func (g *CustomStorageExecution) execute(ctx context.Context, command isRequest_
 	defer connection.Close()
 	// The receiver validates its own identity before admitting GPU work.
 	files := append([]*os.File{g.BrokerProcess}, pidfds...)
-	response, err := exchange(ctx, connection.(*net.UnixConn), g.TransactionID, command, files...)
+	response, err := exchange(ctx, connection.(*net.UnixConn), newRequest(g.TransactionID, command), files...)
 	if err != nil {
 		_ = g.Abort(ctx)
 		if ctx.Err() != nil {

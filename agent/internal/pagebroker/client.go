@@ -174,17 +174,12 @@ func (c Client) dial(ctx context.Context) (net.Conn, error) {
 }
 
 func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
-	response, _, err := c.requestResponse(ctx, transactionID, &Request{Command: command}, files...)
+	response, _, err := c.requestResponse(ctx, newRequest(transactionID, command), files...)
 	return response, err
 }
 
-func (c Client) requestResponse(ctx context.Context, transactionID string, request *Request, files ...*os.File) (*Response, *os.File, error) {
+func (c Client) requestResponse(ctx context.Context, request *Request, files ...*os.File) (*Response, *os.File, error) {
 	// Check framing before dialing. GPU exchanges still send file descriptors through exchange.
-	requestID := uuid.NewString()
-	request.RequestId = &requestID
-	if transactionID != "" {
-		request.TransactionId = &transactionID
-	}
 	if proto.Size(request) > maxMessageSize {
 		return nil, nil, errMessageTooLarge
 	}
@@ -200,30 +195,31 @@ func (c Client) requestResponse(ctx context.Context, transactionID string, reque
 		return nil, nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err), dial: true}
 	}
 	defer connection.Close()
-	return exchangeResponse(ctx, connection.(*net.UnixConn), transactionID, request, files...)
+	return exchangeResponse(ctx, connection.(*net.UnixConn), request, files...)
 }
 
-func exchange(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
-	response, _, err := exchangeResponse(ctx, connection, transactionID, &Request{Command: command}, files...)
+func newRequest(transactionID string, command isRequest_Command) *Request {
+	requestID := uuid.NewString()
+	request := &Request{RequestId: &requestID, Command: command}
+	if transactionID != "" {
+		request.TransactionId = &transactionID
+	}
+	return request
+}
+
+func exchange(ctx context.Context, connection *net.UnixConn, request *Request, files ...*os.File) (*Response, error) {
+	response, _, err := exchangeResponse(ctx, connection, request, files...)
 	return response, err
 }
 
 // exchangeResponse returns a broker pidfd only when the request sets RequestBrokerPidfd.
-func exchangeResponse(ctx context.Context, connection *net.UnixConn, transactionID string, request *Request, files ...*os.File) (*Response, *os.File, error) {
+func exchangeResponse(ctx context.Context, connection *net.UnixConn, request *Request, files ...*os.File) (*Response, *os.File, error) {
 	stopCancel := context.AfterFunc(ctx, func() {
 		_ = connection.CloseWrite()
 		_ = connection.Close()
 	})
 	defer stopCancel()
 
-	requestID := request.GetRequestId()
-	if requestID == "" {
-		requestID = uuid.NewString()
-		request.RequestId = &requestID
-	}
-	if transactionID != "" {
-		request.TransactionId = &transactionID
-	}
 	message, err := proto.Marshal(request)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal PageBroker request: %w", err)
@@ -250,7 +246,7 @@ func exchangeResponse(ctx context.Context, connection *net.UnixConn, transaction
 	if err := proto.Unmarshal(message, response); err != nil {
 		return nil, nil, fmt.Errorf("unmarshal PageBroker response: %w", err)
 	}
-	if response.GetRequestId() != requestID || response.GetTransactionId() != transactionID {
+	if response.GetRequestId() != request.GetRequestId() || response.GetTransactionId() != request.GetTransactionId() {
 		return nil, nil, fmt.Errorf("PageBroker response identifiers do not match request")
 	}
 	if failure := response.GetFailure(); failure != nil {
@@ -258,11 +254,11 @@ func exchangeResponse(ctx context.Context, connection *net.UnixConn, transaction
 		// paths and is not guaranteed valid UTF-8. Only the storage-extension codes
 		// promise the smaller, UTF-8 wire bound; legacy and unknown codes retain the
 		// existing frame-size limit and are not UTF-8 checked.
-		if isStorageFailure(failure.GetCode()) &&
-			(len(failure.GetMessage()) > maxFailureMessageSize || !utf8.ValidString(failure.GetMessage())) {
-			return nil, nil, fmt.Errorf("invalid PageBroker failure message")
+		message := failure.GetMessage()
+		if isStorageFailure(failure.GetCode()) && (len(message) > maxFailureMessageSize || !utf8.ValidString(message)) {
+			message = "message omitted: exceeds the storage failure bound or is not valid UTF-8"
 		}
-		return nil, nil, &FailureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
+		return nil, nil, &FailureError{code: failureCode(failure.GetCode()), message: message}
 	}
 	if len(receivedFiles) > 1 || (len(receivedFiles) == 1 && !request.GetRequestBrokerPidfd()) {
 		return nil, nil, fmt.Errorf("unexpected PageBroker response descriptors")
