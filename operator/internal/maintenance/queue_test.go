@@ -125,7 +125,7 @@ func TestProcessNextItemDoesNotRequeueItemCancelledInFlight(t *testing.T) {
 
 func newQueue(t *testing.T, cfg operatortypes.ArtifactCleanupConfig) *Queue {
 	t.Helper()
-	q, err := NewQueue(nil, nil, nil, cfg)
+	q, err := NewQueue(context.Background(), nil, nil, nil, cfg)
 	require.NoError(t, err)
 	t.Cleanup(q.queue.ShutDown)
 	return q
@@ -142,9 +142,16 @@ func TestNewQueueDefaults(t *testing.T) {
 
 func TestNewQueueFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
 	cfg := testConfig("/checkpoints")
+	cfg.BackendType = "gcs"
+	_, err := NewQueue(context.Background(), nil, nil, nil, cfg)
+	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "gcs"`)
+}
+
+func TestNewQueueFailsWhenS3IsConfiguredBackendWithoutS3Config(t *testing.T) {
+	cfg := testConfig("")
 	cfg.BackendType = "s3"
-	_, err := NewQueue(nil, nil, nil, cfg)
-	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "s3"`)
+	_, err := NewQueue(context.Background(), nil, nil, nil, cfg)
+	require.ErrorContains(t, err, "artifact cleanup s3 config is required when the backend type is s3")
 }
 
 func TestQueueBackendReturnsTheConfiguredBackend(t *testing.T) {
@@ -164,6 +171,33 @@ func TestQueueBackendFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
 	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "S3"`)
 }
 
+func TestNewQueueRegistersS3BackendWhenItIsTheConfiguredBackend(t *testing.T) {
+	cfg := testConfig("")
+	cfg.BackendType = "s3"
+	cfg.S3 = &operatortypes.S3Config{
+		Bucket: "checkpoints", Region: "us-east-1", CredentialsPath: t.TempDir() + "/credentials",
+	}
+	q := newQueue(t, cfg)
+
+	backend, ok := q.registry.Get(backends.NameS3)
+	require.True(t, ok)
+	assert.Equal(t, backends.NameS3, backend.Name())
+	_, ok = q.registry.Get(backends.NamePVC)
+	assert.False(t, ok, "PVC must not register when S3 is the configured backend")
+}
+
+func TestNewQueueDoesNotRegisterS3BackendWhenPVCIsConfigured(t *testing.T) {
+	cfg := testConfig("/checkpoints")
+	cfg.BackendType = "pvc"
+	cfg.S3 = &operatortypes.S3Config{
+		Bucket: "checkpoints", Region: "us-east-1", CredentialsPath: t.TempDir() + "/credentials",
+	}
+	q := newQueue(t, cfg)
+
+	_, ok := q.registry.Get(backends.NameS3)
+	assert.False(t, ok, "S3 must not register when it is not the configured backend")
+}
+
 func TestQueueBackendResolvesHelmsLowercaseBackendType(t *testing.T) {
 	cfg := testConfig("/checkpoints")
 	cfg.BackendType = "pvc"
@@ -178,7 +212,7 @@ func TestQueueBackendResolvesHelmsLowercaseBackendType(t *testing.T) {
 func TestNewQueueRejectsInvalidConfig(t *testing.T) {
 	cfg := testConfig("/checkpoints")
 	cfg.Workers = 0
-	_, err := NewQueue(nil, nil, nil, cfg)
+	_, err := NewQueue(context.Background(), nil, nil, nil, cfg)
 	require.ErrorContains(t, err, "worker count must be positive")
 }
 
@@ -277,4 +311,66 @@ func TestFailedSweepWaitsForNextTrigger(t *testing.T) {
 	assert.Equal(t, q.config.ListAttempts, reader.calls)
 	assert.Zero(t, q.queue.Len())
 	assert.Zero(t, q.queue.NumRequeues(newSweepKey()))
+}
+
+type stubBackend struct {
+	delete func(ctx context.Context) error
+}
+
+func (b stubBackend) Name() string { return backends.NamePVC }
+
+func (b stubBackend) Delete(ctx context.Context, _ string) error { return b.delete(ctx) }
+
+func (b stubBackend) Candidates(context.Context, logr.Logger) (map[string]struct{}, error) {
+	return map[string]struct{}{}, nil
+}
+
+func queueWithPendingDelete(t *testing.T, backend Backend) (*Queue, WorkItemKey) {
+	t.Helper()
+	now := metav1.Now()
+	content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{
+		Name: "content", UID: "uid-1", ResourceVersion: "1", DeletionTimestamp: &now,
+		Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+	}}
+	q, _ := newTestQueue(t, t.TempDir(), content)
+	q.registry = BackendRegistry{backends: map[string]Backend{backends.NamePVC: backend}}
+	key := newDeleteContentKey(content.Name, content.UID)
+	q.EnqueueDeleteContent(key.Name, key.UID)
+	return q, key
+}
+
+func requireFinalizerRetained(t *testing.T, q *Queue) {
+	t.Helper()
+	current := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, q.client.Get(context.Background(), client.ObjectKey{Name: "content"}, current))
+	assert.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
+}
+
+func TestProcessNextItemRetriesItemThatPanicked(t *testing.T) {
+	q, key := queueWithPendingDelete(t, stubBackend{delete: func(context.Context) error {
+		panic("backend bug")
+	}})
+
+	require.True(t, q.processNextItem(context.Background(), logr.Discard()))
+	assert.Equal(t, 1, q.queue.NumRequeues(key))
+	requireFinalizerRetained(t, q)
+}
+
+func TestProcessNextItemRetriesItemThatOverranItsTimeout(t *testing.T) {
+	q, key := queueWithPendingDelete(t, stubBackend{delete: func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}})
+	q.config.TaskTimeout = 20 * time.Millisecond
+
+	done := make(chan bool, 1)
+	go func() { done <- q.processNextItem(context.Background(), logr.Discard()) }()
+	select {
+	case keepGoing := <-done:
+		require.True(t, keepGoing)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled backend call held the worker past the task timeout")
+	}
+	assert.Equal(t, 1, q.queue.NumRequeues(key))
+	requireFinalizerRetained(t, q)
 }
