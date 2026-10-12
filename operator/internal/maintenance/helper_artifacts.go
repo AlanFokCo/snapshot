@@ -23,7 +23,11 @@ import (
 // must outlive their SnapshotJob along with its independently owned PodSnapshot.
 // Unknown roots are retained for verified manual cleanup.
 func (q *Queue) processHelperSweep(ctx context.Context, backend Backend, logger logr.Logger) error {
-	candidates, err := backend.HelperCandidates(ctx, logger)
+	helperBackend, supported := backend.(HelperBackend)
+	if !supported {
+		return nil // helper artifacts are owned only by a supporting store
+	}
+	candidates, err := helperBackend.HelperCandidates(ctx, logger)
 	if err != nil || len(candidates) == 0 {
 		return err
 	}
@@ -60,7 +64,7 @@ func (q *Queue) processHelperSweep(ctx context.Context, backend Backend, logger 
 		if !stopped {
 			continue
 		}
-		if err := backend.DeleteHelpers(ctx, uid); err != nil {
+		if err := helperBackend.DeleteHelpers(ctx, uid); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
 			logger.Error(err, "Unable to reclaim failed SnapshotJob helper artifacts", "snapshot_job_uid", uid)
 			continue

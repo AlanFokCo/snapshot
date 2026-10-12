@@ -147,8 +147,8 @@ func testPublishedHelperFailureAndRestart(t *testing.T, policy snapshotv1alpha1.
 	require.NoError(t, cl.Status().Update(ctx, completed))
 	otherRoot := filepath.Join(base, podcontract.HelperArtifactsDirectory, string(completed.UID))
 	require.NoError(t, os.MkdirAll(otherRoot, 0o750))
-	q, err := maintenance.NewQueue(cl, cl, recorder, operatortypes.ArtifactCleanupConfig{
-		BasePath: base, ScanInterval: 20 * time.Millisecond, BatchSize: 10, ListAttempts: 3, Workers: 1, BackendType: backends.NamePVC,
+	q, err := maintenance.NewQueue(ctx, cl, cl, recorder, operatortypes.ArtifactCleanupConfig{
+		BasePath: base, ScanInterval: 20 * time.Millisecond, BatchSize: 10, ListAttempts: 3, Workers: 1, TaskTimeout: time.Minute, BackendType: backends.NamePVC,
 	})
 	require.NoError(t, err)
 	runCtx, cancel := context.WithCancel(ctx)

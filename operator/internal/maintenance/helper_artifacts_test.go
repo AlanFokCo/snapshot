@@ -223,7 +223,7 @@ func indexedHelperAttempt(i int) (*snapshotv1alpha1.SnapshotJob, *batchv1.Job, *
 }
 
 type refusingHelperBackend struct {
-	Backend
+	HelperBackend
 	refusedUID string
 }
 
@@ -231,7 +231,7 @@ func (b refusingHelperBackend) DeleteHelpers(ctx context.Context, uid string) er
 	if uid == b.refusedUID {
 		return assert.AnError
 	}
-	return b.Backend.DeleteHelpers(ctx, uid)
+	return b.HelperBackend.DeleteHelpers(ctx, uid)
 }
 
 func TestHelperSweepStorageErrorDoesNotStarveDeletionBatch(t *testing.T) {
@@ -247,7 +247,9 @@ func TestHelperSweepStorageErrorDoesNotStarveDeletionBatch(t *testing.T) {
 	q.config.BatchSize = 1
 	backend, err := q.backend()
 	require.NoError(t, err)
-	require.Error(t, q.processHelperSweep(context.Background(), refusingHelperBackend{Backend: backend, refusedUID: "attempt-0"}, log.Log))
+	helperBackend, ok := backend.(HelperBackend)
+	require.True(t, ok)
+	require.Error(t, q.processHelperSweep(context.Background(), refusingHelperBackend{HelperBackend: helperBackend, refusedUID: "attempt-0"}, log.Log))
 	require.DirExists(t, roots[0])
 	require.NoDirExists(t, roots[1], "a permanent storage failure must not consume the reclamation budget")
 }

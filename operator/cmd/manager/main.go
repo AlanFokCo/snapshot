@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -80,6 +81,7 @@ func main() {
 	}
 
 	maintenanceQueue, err := maintenance.NewQueue(
+		context.Background(),
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		mgr.GetEventRecorderFor("podsnapshotcontent-artifact-cleanup"),
