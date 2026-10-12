@@ -833,9 +833,7 @@ func TestExecutorCheckpointInspectionFailureDoesNotKill(t *testing.T) {
 		_ = target.Wait()
 	}()
 
-	checkpointCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	err := w.executorCheckpoint(checkpointCtx, CheckpointParams{
+	err := w.executorCheckpoint(context.Background(), CheckpointParams{
 		Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name:      "worker-0",
 			Namespace: "inference",

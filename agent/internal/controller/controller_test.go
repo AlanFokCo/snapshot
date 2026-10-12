@@ -95,7 +95,7 @@ func (noopInjector) MountBundle(_ context.Context, _ int) (nsmount.MountPoint, e
 	return noopMountPoint{}, nil
 }
 
-func (noopInjector) MountPageBroker(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
+func (noopInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
 	return noopMountPoint{}, nil
 }
 
@@ -103,7 +103,7 @@ func (noopInjector) MountCuInterpose(context.Context, nsmount.MountPoint) (nsmou
 	return noopMountPoint{}, nil
 }
 
-func (noopInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
+func (noopInjector) MountPageBroker(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
 	return noopMountPoint{}, nil
 }
 
@@ -1322,6 +1322,7 @@ func TestRestoreFinalizerProtectsExecutionAndIsRemovedAfterSuccess(t *testing.T)
 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
+	w.config.PageBroker = types.PageBrokerSpec{ControlSocketPath: "/pagebroker/control/pagebroker.sock"}
 	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(path, 0o700))
@@ -1341,29 +1342,11 @@ func TestRestoreFinalizerProtectsExecutionAndIsRemovedAfterSuccess(t *testing.T)
 	assert.Equal(t, 1, restoreCalls)
 	assert.Equal(t, "main", request.ArtifactContainerName)
 	assert.Equal(t, "main", request.DestinationContainerName)
+	assert.Equal(t, "/pagebroker/control/pagebroker.sock", request.PageBrokerControlSocketPath)
 	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.False(t, hasFinalizer(live, restorePodFinalizer))
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), `"reason":"RestoreSucceeded"`)
-}
-
-func TestRestoreRequestCarriesPageBrokerConfig(t *testing.T) {
-	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
-	snapshot, content := readySnapshotObjects()
-	w := makeTestController(t, pod, snapshot, content)
-	w.config.PageBroker = types.PageBrokerSpec{ControlSocketPath: "/pagebroker/control/pagebroker.sock"}
-	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(path, 0o700))
-	var request executor.RestoreRequest
-	w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, got executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
-		request = got
-		return executor.RestoreResult{PlaceholderHostPID: 4242}, nil
-	}
-
-	processQueuedRestorePod(t, w, pod)
-
-	assert.Equal(t, "/pagebroker/control/pagebroker.sock", request.PageBrokerControlSocketPath)
 }
 
 func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *testing.T) {
