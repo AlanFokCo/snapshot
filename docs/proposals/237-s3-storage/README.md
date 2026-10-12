@@ -116,6 +116,8 @@ flowchart TB
 The sequence diagrams below show each flow's happy path and its main failure
 branch. Details follow in [Design Details](#design-details).
 
+**Checkpoint flow**
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -123,7 +125,7 @@ sequenceDiagram
     participant PB as Node PageBroker
     participant S3 as S3-compatible store
     participant API as Kubernetes API
-    Agent->>API: Uncached read of content (store binding, not deleting)
+    Agent->>API: Cached read of content (store binding, not deleting)
     Agent->>PB: Prepare(storeID, artifactUID, container)
     PB->>S3: Preflight destination access
     PB-->>Agent: Transaction opened (2h05m lifetime)
@@ -379,8 +381,11 @@ the cross-component active-operation and generation-fencing contract.
 
 What changes for S3, and why:
 
-- **Deletion check unchanged.** The agent checks the content's deletion timestamp
-  once, as today, and then starts its PageBroker transaction; there is no reread.
+- **Deletion check from the informer cache.** The agent reads the content once from
+  its PodSnapshotContent informer, checks the store binding and the deletion
+  timestamp, and then starts its PageBroker transaction; there is no reread and no
+  direct API read. A deletion that the cache has not yet seen is caught after capture
+  by the finalizer and the sweep, at the cost of one wasted capture.
 - **Metadata through PageBroker.** The agent has no credentials and no bucket
   access, so it obtains the manifest through `GetArtifactMetadata` on the shared
   volume and then runs the existing compatibility checks unchanged. Storage checks
@@ -747,8 +752,8 @@ backend integration with a disposable S3-compatible service, and GPU end-to-end 
   replies/restarts, idempotent `Commit` retry, conflicting index fails closed, agent
   loss after publication leaves the content not Ready, and no CUDA/CRIU replay.
 - **Lifecycle/concurrency:** inspection cleanup on success/refusal/requeue/cancellation;
-  uncached deletion checks; immediate deletion on both backends, including S3
-  deletion under a running download; expiration during upload/download; an index `PUT`
+  deletion checks served from the informer cache; immediate deletion on both backends,
+  including S3 deletion under a running download; expiration during upload/download; an index `PUT`
   accepted before expiry that completes after cleanup is removed by the following
   sweep; stale publishers, incomplete attempts and capture-node loss. Stage 2 adds concurrent
   delete/read/publish races, operation expiry and stale-generation rejection.
