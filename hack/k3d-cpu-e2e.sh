@@ -99,7 +99,7 @@ create_cluster() {
 }
 
 fake_nvidia_runtime_class() {
-  # The agent pod hardcodes runtimeClassName: nvidia. k3s ships its own nvidia
+  # The agent pod defaults to runtimeClassName: nvidia. k3s ships its own nvidia
   # RuntimeClass and `handler` is immutable, so this has to be replaced rather
   # than applied over.
   log "pointing RuntimeClass/nvidia at the runc handler"
@@ -168,7 +168,14 @@ cluster_up() {
     exit 1
   fi
 
+  # The directory is created by whoever runs this script, as that user, with
+  # mode 0755, and is then the checkpoint PVC inside the node. PageBroker
+  # writes as a different UID and previously failed its first Commit here
+  # with "cannot create directories: Permission denied" under
+  # /checkpoints/artifacts. Make it world-writable, as a dynamic hostPath
+  # provisioner does for the volumes it hands out.
   mkdir -p "${HOST_CHECKPOINTS}"
+  chmod 1777 "${HOST_CHECKPOINTS}"
   create_cluster
   export KUBECONFIG="${KUBECONFIG_OUT}"
 
