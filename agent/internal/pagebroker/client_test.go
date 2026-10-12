@@ -123,28 +123,38 @@ func TestRequestStopsWaitingForSocketWhenContextExpires(t *testing.T) {
 
 func TestRequestReturnsAPermanentDialErrorImmediately(t *testing.T) {
 	const limit = 350 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), limit)
-	defer cancel()
 
 	regularFile := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(regularFile, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	socketPath := filepath.Join(regularFile, "pagebroker.sock")
+	client := Client{ControlSocketPath: socketPath}
 
-	start := time.Now()
-	err := (Client{ControlSocketPath: socketPath}).Abort(ctx, "transaction")
-	if errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Abort() error = %v, want the permanent dial error, not the caller's deadline", err)
+	requests := map[string]func(context.Context) error{
+		"Abort":  func(ctx context.Context) error { return client.Abort(ctx, "transaction") },
+		"Commit": func(ctx context.Context) error { return client.Commit(ctx, "transaction") },
 	}
-	if !errors.Is(err, unix.ENOTDIR) {
-		t.Fatalf("Abort() error = %v, want errors.Is(err, unix.ENOTDIR)", err)
-	}
-	if !IsDialError(err) {
-		t.Fatalf("IsDialError(%v) = false, want true", err)
-	}
-	if elapsed := time.Since(start); elapsed >= limit {
-		t.Fatalf("Abort() returned after %v, want well under the %v caller deadline", elapsed, limit)
+	for name, request := range requests {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), limit)
+			defer cancel()
+
+			start := time.Now()
+			err := request(ctx)
+			if errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("%s() error = %v, want the permanent dial error, not the caller's deadline", name, err)
+			}
+			if !errors.Is(err, unix.ENOTDIR) {
+				t.Fatalf("%s() error = %v, want errors.Is(err, unix.ENOTDIR)", name, err)
+			}
+			if !IsDialError(err) {
+				t.Fatalf("IsDialError(%v) = false, want true", err)
+			}
+			if elapsed := time.Since(start); elapsed >= limit {
+				t.Fatalf("%s() returned after %v, want well under the %v caller deadline", name, elapsed, limit)
+			}
+		})
 	}
 }
 

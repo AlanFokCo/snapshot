@@ -89,7 +89,7 @@ func imageDirectory(directory string) (string, error) {
 
 func (c Client) Commit(ctx context.Context, transactionID string) error {
 	err := c.commit(ctx, transactionID)
-	if !isTransportError(err) {
+	if !isRetryableTransportError(err) {
 		return err
 	}
 	return c.retryCommit(ctx, transactionID)
@@ -104,7 +104,7 @@ func (c Client) retryCommit(ctx context.Context, transactionID string) error {
 			return retryCtx.Err()
 		case <-time.After(commitRetryDelay):
 		}
-		if err := c.commit(retryCtx, transactionID); !isTransportError(err) {
+		if err := c.commit(retryCtx, transactionID); !isRetryableTransportError(err) {
 			return err
 		}
 	}
