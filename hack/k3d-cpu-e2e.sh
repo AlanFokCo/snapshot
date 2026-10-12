@@ -114,7 +114,12 @@ registry_up() {
   fi
 
   log "creating registry ${REGISTRY_HOST} on localhost:${REGISTRY_PORT}"
-  k3d registry create "${REGISTRY_NAME}" --port "${REGISTRY_PORT}"
+  # Bound to loopback, not every interface. This registry speaks plain HTTP
+  # and accepts pushes from anyone who can reach it, and on a developer
+  # machine every interface includes the office network. The cluster is
+  # unaffected: the node resolves the registry by container name on the Docker
+  # network, never through this published port.
+  k3d registry create "${REGISTRY_NAME}" --port "127.0.0.1:${REGISTRY_PORT}"
 }
 
 registry_exists() {

@@ -165,11 +165,18 @@ verify-base-packages:
 	diff -u agent/compliance/base-packages.tsv "$$tmp" || \
 	  (echo "ERROR: agent/compliance/base-packages.tsv is stale for $(AGENT_BASE_IMAGE) — run 'make capture-base-packages' and commit"; exit 1)
 
-docker-build-agent:
-	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
+# Shared by the agent image and the bundle export below, which must resolve to
+# the same build up to the agent stage. Held in one variable because a flag
+# that drifted between them would send the export down a different cache path:
+# it would go cold, and then verify a bundle that is not the one being pushed.
+# Only --target and the output differ.
+AGENT_BUILD_FLAGS = --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
 	  --build-arg "GO_VERSION=$(GO_VERSION)" \
 	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
-	  --build-context=api=./api --build-context=compliance=./hack/compliance \
+	  --build-context=api=./api --build-context=compliance=./hack/compliance
+
+docker-build-agent:
+	docker buildx build $(DOCKER_BUILD_ARGS) $(AGENT_BUILD_FLAGS) \
 	  --target agent \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) agent/
 
@@ -179,10 +186,7 @@ docker-build-agent:
 # into a Docker daemon just to copy one directory out of it.
 BUNDLE_DEST ?= ./.agent-bundle
 docker-export-agent-bundle:
-	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
-	  --build-arg "GO_VERSION=$(GO_VERSION)" \
-	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
-	  --build-context=api=./api --build-context=compliance=./hack/compliance \
+	docker buildx build $(DOCKER_BUILD_ARGS) $(AGENT_BUILD_FLAGS) \
 	  --target bundle-export \
 	  --output "type=local,dest=$(BUNDLE_DEST)" agent/
 

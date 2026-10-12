@@ -176,6 +176,9 @@ jobs:
           IMAGE: ${{ matrix.image }}
           BUILD_ARGS: ${{ matrix.build_args }}
           TAGS: ${{ needs.version.outputs.tags }}
+          # The branch whose cache this run owns. Same expression the version
+          # job slugs for image tags, so the two agree on what branch means.
+          CACHE_BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
         run: |
           make "docker-build-${IMAGE}" \
             REGISTRY="${REGISTRY}" \
@@ -184,8 +187,7 @@ jobs:
               --provenance=mode=max \
               --sbom=true \
               --metadata-file=buildx.json \
-              --cache-from=type=registry,ref=${CACHE_REF_PREFIX}:${IMAGE} \
-              --cache-to=type=registry,ref=${CACHE_REF_PREFIX}:${IMAGE},mode=max,image-manifest=true,oci-mediatypes=true"
+              $(hack/ci-cache-flags.sh write "${IMAGE}" "${CACHE_BRANCH}")"
           DIGEST="$(jq -er '."containerimage.digest"' buildx.json)"
           echo "${DIGEST}" > "digest-${IMAGE}.txt"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"

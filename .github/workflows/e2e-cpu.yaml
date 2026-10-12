@@ -33,6 +33,7 @@ on:
       - "hack/compliance/**"
       - "hack/k3d-cpu-e2e.sh"
       - "hack/verify-bundle-glibc.sh"
+      - "hack/ci-cache-flags.sh"
       - "hack/ci-phase.sh"
       - "hack/ci-phase-summary.sh"
       - ".github/workflows/e2e-cpu.yaml"
@@ -77,10 +78,14 @@ env:
   SNAPSHOT_E2E_HELM_TIMEOUT: 6m
   SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
   CI_PHASE_LOG: ${{ github.workspace }}/.ci-phases.tsv
-  CACHE_SCOPE_SUFFIX: ${{ inputs.cache_scope_suffix }}
-  # Written by push-artifacts.yaml on main; read-only here. See the comment on
-  # CACHE_REF_PREFIX there for why this is not the Actions cache.
+  CACHE_TAG_SUFFIX: ${{ inputs.cache_scope_suffix }}
+  # Written by push-artifacts.yaml from main and release/*; read-only here.
+  # See the comment on CACHE_REF_PREFIX there for why this is not the Actions
+  # cache, and hack/ci-cache-flags.sh for why the tag is keyed by branch.
   CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
+  # The branch this change targets, whose cache it reads. base_ref is set on a
+  # pull request; ref_name covers a workflow_dispatch run on a branch.
+  CACHE_BRANCH: ${{ github.base_ref || github.ref_name }}
 
 jobs:
   cpu-e2e:
@@ -154,7 +159,7 @@ jobs:
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
             DOCKER_BUILD_ARGS="--push \
-              --cache-from=type=registry,ref=${CACHE_REF_PREFIX}:operator${CACHE_SCOPE_SUFFIX}"
+              $(hack/ci-cache-flags.sh read operator "${CACHE_BRANCH}")"
           hack/ci-phase.sh "Build operator image" "${start}" \
             "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}"
 
@@ -167,7 +172,7 @@ jobs:
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
             DOCKER_BUILD_ARGS="--push \
-              --cache-from=type=registry,ref=${CACHE_REF_PREFIX}:agent${CACHE_SCOPE_SUFFIX}"
+              $(hack/ci-cache-flags.sh read agent "${CACHE_BRANCH}")"
           hack/ci-phase.sh "Build agent image" "${start}" \
             "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}"
 
@@ -185,7 +190,7 @@ jobs:
           # cost this job no longer pays.
           make docker-export-agent-bundle \
             BUNDLE_DEST="${RUNNER_TEMP}/agent-bundle" \
-            DOCKER_BUILD_ARGS="--cache-from=type=registry,ref=${CACHE_REF_PREFIX}:agent${CACHE_SCOPE_SUFFIX}"
+            DOCKER_BUILD_ARGS="$(hack/ci-cache-flags.sh read agent "${CACHE_BRANCH}")"
           hack/verify-bundle-glibc.sh "${RUNNER_TEMP}/agent-bundle"
 
       - name: Build PageBroker image
@@ -197,7 +202,7 @@ jobs:
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
             DOCKER_BUILD_ARGS="--push \
-              --cache-from=type=registry,ref=${CACHE_REF_PREFIX}:pagebroker${CACHE_SCOPE_SUFFIX}"
+              $(hack/ci-cache-flags.sh read pagebroker "${CACHE_BRANCH}")"
           hack/ci-phase.sh "Build PageBroker image" "${start}" \
             "${IMAGE_REGISTRY}/pagebroker:${IMAGE_TAG}"
 
@@ -321,9 +326,9 @@ jobs:
         if: ${{ always() }}
         run: |
           set -euo pipefail
-          state="warm"
-          if [ -n "${CACHE_SCOPE_SUFFIX}" ]; then
-            state="cold (scope suffix \`${CACHE_SCOPE_SUFFIX}\`)"
+          state="warm (\`${CACHE_BRANCH}\`)"
+          if [ -n "${CACHE_TAG_SUFFIX}" ]; then
+            state="cold (tag suffix \`${CACHE_TAG_SUFFIX}\`)"
           fi
           hack/ci-phase-summary.sh "${state}" >>"${GITHUB_STEP_SUMMARY}"
           # This job used to delete ~25 GB of preinstalled SDKs before it
