@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
@@ -912,6 +913,107 @@ func TestRestoreReturnsBothRestoreAndAbortErrorsOnCleanupFailure(t *testing.T) {
 		t.Fatalf("restore error = %v, want the Abort failure joined in too", err)
 	}
 	waitPageBrokerTest(t, server)
+}
+
+func TestRestoreSuccessfulCPURestoreUnmountsBeforeCommitAndSkipsAbort(t *testing.T) {
+	base := t.TempDir()
+	directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+	if err := types.WriteManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	events := make(chan string, 8)
+	originalExec := execNSRestoreFunc
+	t.Cleanup(func() { execNSRestoreFunc = originalExec })
+	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+		return &RestoreInNamespaceResult{
+			RestoredPID:  4242,
+			CleanupError: &CleanupError{Action: "unmount something", Message: "fake cleanup failure"},
+		}, nil
+	}
+	originalValidate := validateRestoredProcessFunc
+	t.Cleanup(func() { validateRestoredProcessFunc = originalValidate })
+	validateRestoredProcessFunc = func(string, int, logr.Logger) error { return nil }
+
+	listener := listenPageBroker(t)
+	server := make(chan error, 1)
+	go func() {
+		for _, step := range []string{"stage", "commit"} {
+			connection, err := listener.Accept()
+			if err != nil {
+				server <- err
+				return
+			}
+			request, err := readPageBrokerTestRequest(connection)
+			if err != nil {
+				connection.Close()
+				server <- err
+				return
+			}
+			response := &pagebroker.Response{}
+			switch step {
+			case "stage":
+				if request.GetStagedRestore() == nil {
+					err = errors.New("expected StagedRestore")
+				}
+				response.Result = &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &directory}}
+			case "commit":
+				if request.GetCommit() == nil {
+					err = errors.New("expected Commit")
+				}
+				events <- "commit request received"
+				response.Result = &pagebroker.Response_CommitComplete{CommitComplete: &pagebroker.CommitComplete{}}
+			}
+			if err == nil {
+				err = replyPageBrokerTest(connection, request, response)
+			}
+			connection.Close()
+			if err != nil {
+				server <- err
+				return
+			}
+		}
+		server <- nil
+	}()
+
+	mounts := &cleanupMounter{events: events}
+	ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+	defer cancel()
+	restored, err := Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		PageBrokerControlSocketPath: listener.Addr().String(),
+		PageBrokerRestoreMode:       "staged", SkipCompatCheck: true,
+	}, mounts)
+
+	var cleanupErr *RestoreCleanupError
+	if !errors.As(err, &cleanupErr) {
+		t.Fatalf("restore error = %v, want a *RestoreCleanupError wrapping the fake nsrestore cleanup failure", err)
+	}
+	if !strings.Contains(err.Error(), "fake cleanup failure") {
+		t.Fatalf("restore error = %v, want it to carry the fake cleanup failure", err)
+	}
+	if restored.RestoredPID != 4242 {
+		t.Fatalf("restore result = %+v, want the successful restore's PID preserved despite the cleanup error", restored)
+	}
+
+	waitPageBrokerTest(t, server)
+	close(events)
+	var observed []string
+	for event := range events {
+		observed = append(observed, event)
+	}
+	want := []string{"unmount staging", "commit request received", "unmount bundle"}
+	if !reflect.DeepEqual(observed, want) {
+		t.Fatalf("event order = %v, want %v (source unmounted before Commit, Abort never sent)", observed, want)
+	}
 }
 
 func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {

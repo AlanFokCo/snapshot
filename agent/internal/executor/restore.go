@@ -33,6 +33,15 @@ import (
 
 const failedRestoreTerminationTimeout = 30 * time.Second
 
+// execNSRestoreFunc is overridden in tests: execNSRestore execs the real
+// nsrestore binary inside the placeholder's namespaces, which needs a live
+// placeholder process and is not something a unit test can satisfy.
+var execNSRestoreFunc = execNSRestore
+
+// validateRestoredProcessFunc is overridden in tests: validateRestoredProcess
+// stats the restored process through /host/proc, which only exists on a real node.
+var validateRestoredProcessFunc = validateRestoredProcess
+
 // RestoreMounter installs the fixed binary bundle, the cuinterpose libraries and one
 // validated checkpoint artifact inside a placeholder container's mount namespace.
 type RestoreMounter interface {
@@ -296,7 +305,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  sourceMount,
 	})
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath, gpu)
+	result, err := execNSRestoreFunc(ctx, log, req, snap, bundleMount, containerCheckpointPath, gpu)
 	if err != nil {
 		if usePageBrokerGPU {
 			// Abort may stop the placeholder before the controller can write its
@@ -327,7 +336,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}
-	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
+	if err := validateRestoredProcessFunc(snap.TargetRoot, result.RestoredPID, log); err != nil {
 		return RestoreResult{}, err
 	}
 
