@@ -28,7 +28,6 @@ func main() {
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
 	flag.Parse()
-	finalizeArtifactCleanupFlags(artifactCleanupConfig)
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
 		os.Exit(1)

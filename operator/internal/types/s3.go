@@ -5,9 +5,6 @@ package types
 
 import "fmt"
 
-// DefaultS3CredentialsPath matches the operator manager's projected Secret mount.
-const DefaultS3CredentialsPath = "/etc/snapshot/s3-credentials/credentials"
-
 // S3Config configures the S3 maintenance backend. A nil *S3Config on
 // ArtifactCleanupConfig means S3 maintenance is not registered.
 type S3Config struct {
