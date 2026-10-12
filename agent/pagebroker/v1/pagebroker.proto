@@ -66,12 +66,11 @@ message ArtifactTarget
   ArtifactIdentity artifact = 2;  // Logical destination within that store.
 }
 // Immutable publication descriptor, persisted by Snapshot after checkpoint Commit.
-// Handles are opaque to callers; the configured backend and version select the reader.
+// Handles are opaque to callers; the configured backend selects the reader.
 message PublishedArtifact
 {
   string store_id = 1;                 // Bind subsequent reads to the original store.
   string artifact_handle = 2;          // Backend locator; callers persist it unchanged.
-  string artifact_format_version = 3;  // Select the configured backend's reader.
 }
 
 message StagedRestoreRequest

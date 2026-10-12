@@ -770,14 +770,13 @@ func (x *ArtifactTarget) GetArtifact() *ArtifactIdentity {
 }
 
 // Immutable publication descriptor, persisted by Snapshot after checkpoint Commit.
-// Handles are opaque to callers; the configured backend and version select the reader.
+// Handles are opaque to callers; the configured backend selects the reader.
 type PublishedArtifact struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	StoreId               string                 `protobuf:"bytes,1,opt,name=store_id,json=storeId,proto3" json:"store_id,omitempty"`                                             // Bind subsequent reads to the original store.
-	ArtifactHandle        string                 `protobuf:"bytes,2,opt,name=artifact_handle,json=artifactHandle,proto3" json:"artifact_handle,omitempty"`                        // Backend locator; callers persist it unchanged.
-	ArtifactFormatVersion string                 `protobuf:"bytes,3,opt,name=artifact_format_version,json=artifactFormatVersion,proto3" json:"artifact_format_version,omitempty"` // Select the configured backend's reader.
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	StoreId        string                 `protobuf:"bytes,1,opt,name=store_id,json=storeId,proto3" json:"store_id,omitempty"`                      // Bind subsequent reads to the original store.
+	ArtifactHandle string                 `protobuf:"bytes,2,opt,name=artifact_handle,json=artifactHandle,proto3" json:"artifact_handle,omitempty"` // Backend locator; callers persist it unchanged.
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PublishedArtifact) Reset() {
@@ -820,13 +819,6 @@ func (x *PublishedArtifact) GetStoreId() string {
 func (x *PublishedArtifact) GetArtifactHandle() string {
 	if x != nil {
 		return x.ArtifactHandle
-	}
-	return ""
-}
-
-func (x *PublishedArtifact) GetArtifactFormatVersion() string {
-	if x != nil {
-		return x.ArtifactFormatVersion
 	}
 	return ""
 }
@@ -2253,11 +2245,10 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x0econtainer_name\x18\x02 \x01(\tR\rcontainerName\"q\n" +
 	"\x0eArtifactTarget\x12\x19\n" +
 	"\bstore_id\x18\x01 \x01(\tR\astoreId\x12D\n" +
-	"\bartifact\x18\x02 \x01(\v2(.snapshot.pagebroker.v1.ArtifactIdentityR\bartifact\"\x8f\x01\n" +
+	"\bartifact\x18\x02 \x01(\v2(.snapshot.pagebroker.v1.ArtifactIdentityR\bartifact\"W\n" +
 	"\x11PublishedArtifact\x12\x19\n" +
 	"\bstore_id\x18\x01 \x01(\tR\astoreId\x12'\n" +
-	"\x0fartifact_handle\x18\x02 \x01(\tR\x0eartifactHandle\x126\n" +
-	"\x17artifact_format_version\x18\x03 \x01(\tR\x15artifactFormatVersion\"\xdc\x01\n" +
+	"\x0fartifact_handle\x18\x02 \x01(\tR\x0eartifactHandle\"\xdc\x01\n" +
 	"\x14StagedRestoreRequest\x12>\n" +
 	"\x06source\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\x06source\x12=\n" +
 	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\x12E\n" +

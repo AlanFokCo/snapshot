@@ -21,14 +21,14 @@
     {
       "name": "artifact-restore",
       "type": "Request",
-      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" staged_restore { artifact { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact_handle: \"artifacts/content-1/containers/main/index.json\" artifact_format_version: \"snapshot.pagebroker/v1\" } }",
-      "wire_hex": "0a09726571756573742d31120474782d311a96011a93010a4973746f72652d76312d61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161122e6172746966616374732f636f6e74656e742d312f636f6e7461696e6572732f6d61696e2f696e6465782e6a736f6e1a16736e617073686f742e7061676562726f6b65722f7631"
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" staged_restore { artifact { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact_handle: \"artifacts/content-1/containers/main/index.json\" } }",
+      "wire_hex": "0a09726571756573742d31120474782d311a7d1a7b0a4973746f72652d76312d61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161122e6172746966616374732f636f6e74656e742d312f636f6e7461696e6572732f6d61696e2f696e6465782e6a736f6e"
     },
     {
       "name": "metadata-request",
       "type": "Request",
-      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" get_artifact_metadata { artifact { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact_handle: \"artifacts/content-1/containers/main/index.json\" artifact_format_version: \"snapshot.pagebroker/v1\" } }",
-      "wire_hex": "0a09726571756573742d31120474782d31a20196010a93010a4973746f72652d76312d61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161122e6172746966616374732f636f6e74656e742d312f636f6e7461696e6572732f6d61696e2f696e6465782e6a736f6e1a16736e617073686f742e7061676562726f6b65722f7631"
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" get_artifact_metadata { artifact { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact_handle: \"artifacts/content-1/containers/main/index.json\" } }",
+      "wire_hex": "0a09726571756573742d31120474782d31a2017d0a7b0a4973746f72652d76312d61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161122e6172746966616374732f636f6e74656e742d312f636f6e7461696e6572732f6d61696e2f696e6465782e6a736f6e"
     },
     {
       "name": "commit-request",
@@ -45,8 +45,8 @@
     {
       "name": "checkpoint-result",
       "type": "Response",
-      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" commit_complete { published_artifact { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact_handle: \"artifacts/content-1/containers/main/index.json\" artifact_format_version: \"snapshot.pagebroker/v1\" } }",
-      "wire_hex": "0a09726571756573742d31120474782d312a96010a93010a4973746f72652d76312d61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161122e6172746966616374732f636f6e74656e742d312f636f6e7461696e6572732f6d61696e2f696e6465782e6a736f6e1a16736e617073686f742e7061676562726f6b65722f7631"
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" commit_complete { published_artifact { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact_handle: \"artifacts/content-1/containers/main/index.json\" } }",
+      "wire_hex": "0a09726571756573742d31120474782d312a7d0a7b0a4973746f72652d76312d61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161122e6172746966616374732f636f6e74656e742d312f636f6e7461696e6572732f6d61696e2f696e6465782e6a736f6e"
     },
     {
       "name": "legacy-or-restore-commit",
