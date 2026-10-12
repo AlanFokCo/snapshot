@@ -74,6 +74,7 @@ func TestPreflightCompatibilityComparesTheRecordedEnvironment(t *testing.T) {
 func TestPreflightCompatibilityDescribesEveryRestoreTarget(t *testing.T) {
 	r := newGatedRestore(t)
 	r.controller.config.HostKernelVersion = "5.15.0-1071-aws"
+	r.controller.config.HostCPUFeatures = []string{"avx2", "sse2"}
 	r.pod.Spec.Containers[0].Image = "nvcr.io/nvidia/tritonserver:24.09-py3"
 	r.pod.Status.ContainerStatuses[0].ImageID = "sha256:deadbeef"
 	r.pod.Spec.Containers = append(r.pod.Spec.Containers, corev1.Container{
@@ -95,11 +96,13 @@ func TestPreflightCompatibilityDescribesEveryRestoreTarget(t *testing.T) {
 	assert.Equal(t, compat.Environment{
 		CPUArch:       runtime.GOARCH,
 		KernelVersion: "5.15.0-1071-aws",
+		CPUFeatures:   []string{"avx2", "sse2"},
 		Image:         "nvcr.io/nvidia/tritonserver:24.09-py3",
 	}, r.comparison.calls[0].target)
 	assert.Equal(t, compat.Environment{
 		CPUArch:       runtime.GOARCH,
 		KernelVersion: "5.15.0-1071-aws",
+		CPUFeatures:   []string{"avx2", "sse2"},
 		Image:         "nvcr.io/nvidia/tritonserver:25.01-py3",
 	}, r.comparison.calls[1].target)
 }
