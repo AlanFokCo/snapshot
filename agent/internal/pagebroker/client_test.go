@@ -18,6 +18,30 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func readRequest(connection net.Conn) (*Request, error) {
+	message, err := readMessage(connection)
+	if err != nil {
+		return nil, err
+	}
+	request := new(Request)
+	if err := proto.Unmarshal(message, request); err != nil {
+		return nil, err
+	}
+	return request, nil
+}
+
+func writeReply(connection net.Conn, request *Request, result isResponse_Result) error {
+	message, err := proto.Marshal(&Response{
+		RequestId:     request.RequestId,
+		TransactionId: request.TransactionId,
+		Result:        result,
+	})
+	if err != nil {
+		return err
+	}
+	return writeMessage(connection, message)
+}
+
 func TestFailureCodeMapsUnknownValuesToUnspecified(t *testing.T) {
 	if got := failureCode(Failure_Code(99)); got != Failure_UNSPECIFIED {
 		t.Fatalf("failureCode(99) = %v, want %v", got, Failure_UNSPECIFIED)
@@ -64,10 +88,14 @@ func TestRequestStopsWhenContextIsCanceled(t *testing.T) {
 }
 
 func TestRequestWaitsForSocketToAppear(t *testing.T) {
+	const limit = 5 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+
 	socketPath := filepath.Join(t.TempDir(), "pagebroker.sock")
 	result := make(chan error, 1)
 	go func() {
-		result <- (Client{ControlSocketPath: socketPath}).Abort(context.Background(), "transaction")
+		result <- (Client{ControlSocketPath: socketPath}).Abort(ctx, "transaction")
 	}()
 
 	time.Sleep(300 * time.Millisecond)
@@ -76,32 +104,31 @@ func TestRequestWaitsForSocketToAppear(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
+	if err := listener.(*net.UnixListener).SetDeadline(time.Now().Add(limit)); err != nil {
+		t.Fatal(err)
+	}
 	connection, err := listener.Accept()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer connection.Close()
-	message, err := readMessage(connection)
+	if err := connection.SetDeadline(time.Now().Add(limit)); err != nil {
+		t.Fatal(err)
+	}
+	request, err := readRequest(connection)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := new(Request)
-	if err := proto.Unmarshal(message, request); err != nil {
+	if err := writeReply(connection, request, &Response_AbortComplete{AbortComplete: &AbortComplete{}}); err != nil {
 		t.Fatal(err)
 	}
-	message, err = proto.Marshal(&Response{
-		RequestId:     request.RequestId,
-		TransactionId: request.TransactionId,
-		Result:        &Response_AbortComplete{AbortComplete: &AbortComplete{}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := writeMessage(connection, message); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-result; err != nil {
-		t.Fatalf("Abort() = %v, want success after the socket appeared", err)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("Abort() = %v, want success after the socket appeared", err)
+		}
+	case <-time.After(limit):
+		t.Fatal("Abort() did not return after the socket appeared")
 	}
 }
 
@@ -174,30 +201,15 @@ func TestCommitRetriesLostResponses(t *testing.T) {
 				server <- err
 				return
 			}
-			message, err := readMessage(connection)
+			request, err := readRequest(connection)
 			if err != nil {
-				_ = connection.Close()
-				server <- err
-				return
-			}
-			request := new(Request)
-			if err := proto.Unmarshal(message, request); err != nil {
 				_ = connection.Close()
 				server <- err
 				return
 			}
 			requests <- request
 			if attempt == 2 {
-				response := &Response{
-					RequestId:     request.RequestId,
-					TransactionId: request.TransactionId,
-					Result:        &Response_CommitComplete{CommitComplete: &CommitComplete{}},
-				}
-				message, err = proto.Marshal(response)
-				if err == nil {
-					err = writeMessage(connection, message)
-				}
-				if err != nil {
+				if err := writeReply(connection, request, &Response_CommitComplete{CommitComplete: &CommitComplete{}}); err != nil {
 					_ = connection.Close()
 					server <- err
 					return
@@ -284,25 +296,12 @@ func TestAbortRequiresAbortComplete(t *testing.T) {
 			return
 		}
 		defer connection.Close()
-		message, err := readMessage(connection)
+		request, err := readRequest(connection)
 		if err != nil {
 			server <- err
 			return
 		}
-		request := new(Request)
-		if err := proto.Unmarshal(message, request); err != nil {
-			server <- err
-			return
-		}
-		message, err = proto.Marshal(&Response{
-			RequestId:     request.RequestId,
-			TransactionId: request.TransactionId,
-			Result:        &Response_CommitComplete{CommitComplete: &CommitComplete{}},
-		})
-		if err == nil {
-			err = writeMessage(connection, message)
-		}
-		server <- err
+		server <- writeReply(connection, request, &Response_CommitComplete{CommitComplete: &CommitComplete{}})
 	}()
 
 	if err := (Client{ControlSocketPath: listener.Addr().String()}).Abort(context.Background(), "transaction"); err == nil {
@@ -350,13 +349,8 @@ func TestImageDirectoryResponses(t *testing.T) {
 						return
 					}
 					defer connection.Close()
-					message, err := readMessage(connection)
+					request, err := readRequest(connection)
 					if err != nil {
-						server <- err
-						return
-					}
-					request := new(Request)
-					if err := proto.Unmarshal(message, request); err != nil {
 						server <- err
 						return
 					}
@@ -371,15 +365,11 @@ func TestImageDirectoryResponses(t *testing.T) {
 					if outcome == "empty" {
 						directory = ""
 					}
-					response := &Response{RequestId: request.RequestId, TransactionId: request.TransactionId, Result: tc.reply(directory)}
+					result := tc.reply(directory)
 					if outcome == "wrong-response" {
-						response.Result = &Response_CommitComplete{CommitComplete: &CommitComplete{}}
+						result = &Response_CommitComplete{CommitComplete: &CommitComplete{}}
 					}
-					message, err = proto.Marshal(response)
-					if err == nil {
-						err = writeMessage(connection, message)
-					}
-					server <- err
+					server <- writeReply(connection, request, result)
 				}()
 				directory, err := tc.call(Client{ControlSocketPath: listener.Addr().String()}, context.Background())
 				if outcome == "valid" {
@@ -446,13 +436,8 @@ func TestDirectRestoreResponse(t *testing.T) {
 					return
 				}
 				defer connection.Close()
-				message, err := readMessage(connection)
+				request, err := readRequest(connection)
 				if err != nil {
-					server <- err
-					return
-				}
-				request := new(Request)
-				if err := proto.Unmarshal(message, request); err != nil {
 					server <- err
 					return
 				}
@@ -460,17 +445,13 @@ func TestDirectRestoreResponse(t *testing.T) {
 					server <- errors.New("unexpected direct restore request")
 					return
 				}
-				response := &Response{RequestId: request.RequestId, TransactionId: request.TransactionId}
+				var result isResponse_Result
 				if ready {
-					response.Result = &Response_DirectRestoreReady{DirectRestoreReady: &DirectRestoreReady{}}
+					result = &Response_DirectRestoreReady{DirectRestoreReady: &DirectRestoreReady{}}
 				} else {
-					response.Result = &Response_CommitComplete{CommitComplete: &CommitComplete{}}
+					result = &Response_CommitComplete{CommitComplete: &CommitComplete{}}
 				}
-				message, err = proto.Marshal(response)
-				if err == nil {
-					err = writeMessage(connection, message)
-				}
-				server <- err
+				server <- writeReply(connection, request, result)
 			}()
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
