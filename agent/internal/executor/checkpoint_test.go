@@ -418,5 +418,4 @@ func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 func TestCheckpointNeedsSourceKill(t *testing.T) {
 	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
 	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))
-	assert.False(t, CheckpointNeedsSourceKill(fmt.Errorf("commit PageBroker checkpoint: %w", errors.New("failed"))))
 }

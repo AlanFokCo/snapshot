@@ -6,7 +6,6 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,9 +35,9 @@ import (
 )
 
 func TestRestoreUsesSavedCUDAFormat(t *testing.T) {
-	for _, engine := range []bool{false, true} {
+	for _, customStorageAvailable := range []bool{false, true} {
 		for _, storage := range []string{"cpu", "driver", "custom"} {
-			t.Run(fmt.Sprintf("available-%t/%s", engine, storage), func(t *testing.T) {
+			t.Run(fmt.Sprintf("available-%t/%s", customStorageAvailable, storage), func(t *testing.T) {
 				base := t.TempDir()
 				directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
 				if err != nil {
@@ -51,21 +50,19 @@ func TestRestoreUsesSavedCUDAFormat(t *testing.T) {
 					types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
 				if storage != "cpu" {
 					manifest.CUDA = types.CUDAManifest{PIDs: []int{12}, CustomStorage: storage == "custom"}
-					if err := os.WriteFile(filepath.Join(directory, podcontract.CUDAJobFileName), []byte("launch-state"), 0600); err != nil {
-						t.Fatal(err)
-					}
 				}
 				if err := types.WriteManifest(directory, manifest); err != nil {
 					t.Fatal(err)
 				}
 				log := testr.New(t)
+				// checkpointPathRuntime stops at ResolveContainer, before PageBroker
+				// preparation, so no fixture content past the manifest is ever read.
 				_, err = Restore(context.Background(), checkpointPathRuntime{}, log, RestoreRequest{
 					BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
-					CustomStorageAvailable: engine,
+					CustomStorageAvailable: customStorageAvailable,
 				}, nsmount.New(log))
-				// Restore uses startup capabilities without contacting PageBroker.
 				want := "stop after path preparation"
-				if storage == "custom" && !engine {
+				if storage == "custom" && !customStorageAvailable {
 					want = "PageBroker does not support CustomStorage restore"
 				}
 				if err == nil || !strings.Contains(err.Error(), want) {
@@ -676,22 +673,11 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 					}
 					err = func() error {
 						defer connection.Close()
-						if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+						request, err := readPageBrokerTestRequest(connection)
+						if err != nil {
 							return err
 						}
-						var size uint32
-						if err := binary.Read(connection, binary.BigEndian, &size); err != nil {
-							return err
-						}
-						data := make([]byte, size)
-						if _, err := io.ReadFull(connection, data); err != nil {
-							return err
-						}
-						request := new(pagebroker.Request)
-						if err := proto.Unmarshal(data, request); err != nil {
-							return err
-						}
-						response := &pagebroker.Response{RequestId: request.RequestId, TransactionId: request.TransactionId}
+						response := &pagebroker.Response{}
 						if i == 0 {
 							transaction = request.GetTransactionId()
 							if transaction == "" {
@@ -719,15 +705,7 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 							}
 							response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
 						}
-						data, err = proto.Marshal(response)
-						if err != nil {
-							return err
-						}
-						if err := binary.Write(connection, binary.BigEndian, uint32(len(data))); err != nil {
-							return err
-						}
-						_, err = connection.Write(data)
-						return err
+						return replyPageBrokerTest(connection, request, response)
 					}()
 					if err != nil {
 						server <- err
