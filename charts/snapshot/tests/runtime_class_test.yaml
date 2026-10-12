@@ -4,14 +4,17 @@
 suite: snapshot agent runtime class
 templates:
   - templates/daemonset.yaml
+  - templates/configmap.yaml
 tests:
   - it: uses the nvidia RuntimeClass by default
+    template: templates/daemonset.yaml
     asserts:
       - equal:
           path: spec.template.spec.runtimeClassName
           value: nvidia
 
   - it: renders a configured RuntimeClass
+    template: templates/daemonset.yaml
     set:
       daemonset.runtimeClassName: nvidia-cdi
     asserts:
@@ -20,6 +23,7 @@ tests:
           value: nvidia-cdi
 
   - it: omits runtimeClassName when set to empty
+    template: templates/daemonset.yaml
     set:
       daemonset.runtimeClassName: ""
     asserts:

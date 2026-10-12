@@ -1005,6 +1005,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 		CustomStorageAvailable:      w.config.CustomStorageAvailable,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
 		PageBrokerRestoreMode:       w.config.PageBroker.RestoreMode,
+		PageBrokerTransferEngine:    w.config.PageBroker.TransferEngine,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)
 }

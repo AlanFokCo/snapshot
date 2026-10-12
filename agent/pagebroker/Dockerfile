@@ -54,7 +54,35 @@ RUN find /tmp/nixl/subprojects -type f \( -iname 'license*' -o -iname 'copying*'
       done < /tmp/nixl-notices > /nixl-runtime/THIRD-PARTY-NOTICES.txt
 RUN git -C /tmp/nvtx rev-parse HEAD > /NVTX_COMMIT
 
+FROM ${DOCKER_PROXY}library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS model-streamer-install
+
+COPY model-streamer-wheel.sha256 /model-streamer-wheel.sha256
+COPY model-streamer-headers.sha256 /model-streamer-headers.sha256
+COPY --from=model-streamer-headers / /opt/model-streamer-sdk/include/
+RUN cd /opt/model-streamer-sdk/include && sha256sum -c /model-streamer-headers.sha256
+COPY --from=model-streamer-wheel / /wheels/
+RUN set -eu; \
+    set -- /wheels/*.whl; \
+    [ "$#" -eq 1 ] && [ -f "$1" ] || { echo "exactly one Model Streamer wheel is required" >&2; exit 1; }; \
+    expected=$(sed -n '1p' /model-streamer-wheel.sha256); \
+    actual=$(sha256sum "$1"); actual=${actual%% *}; \
+    [ "$actual" = "$expected" ] || { echo "Model Streamer wheel SHA-256 mismatch: expected $expected, got $actual" >&2; exit 1; }; \
+    python3 -m pip install --no-cache-dir --no-deps --target /opt/model-streamer "$1"; \
+    package=/opt/model-streamer/runai_model_streamer; \
+    test -f "$package/libstreamer/lib/libstreamer.so"; \
+    mkdir -p /opt/model-streamer-sdk/lib /opt/model-streamer-sdk/legal; \
+    cp "$package/libstreamer/lib/libstreamer.so" /opt/model-streamer-sdk/lib/; \
+    license=$(find /opt/model-streamer -path '*.dist-info/LICENSE' -print -quit); \
+    metadata=$(find /opt/model-streamer -path '*.dist-info/METADATA' -print -quit); \
+    test -n "$license"; \
+    test -n "$metadata"; \
+    cp "$license" /opt/model-streamer-sdk/legal/LICENSE; \
+    cp "$metadata" /opt/model-streamer-sdk/legal/METADATA
+
 FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build-dependencies
+
+COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
+COPY --from=model-streamer-install /opt/model-streamer-sdk/include/ /usr/local/include/
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -116,7 +144,7 @@ COPY compliance/gen-attribution.sh /tmp/gen-attribution.sh
 RUN sh /tmp/gen-attribution.sh /legal/source/protobuf /legal/THIRD-PARTY.txt \
     /legal/source/libaio /legal/source/nixl /legal/source/nvtx
 
-FROM ${PAGEBROKER_BASE_IMAGE}
+FROM ${PAGEBROKER_BASE_IMAGE} AS runtime
 
 COPY --from=build /src/pagebroker /usr/local/bin/pagebroker
 COPY --from=build /runtime-lib/ /usr/local/lib/
@@ -124,5 +152,9 @@ COPY --from=nixl /nixl-runtime/lib/ /usr/local/lib/
 COPY --from=sources /legal /legal
 ENV LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
+COPY --from=model-streamer-legal / /legal/model-streamer/
+COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
+COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/LICENSE /legal/model-streamer/LICENSE
+COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/METADATA /legal/model-streamer/METADATA
 
 ENTRYPOINT ["/usr/local/bin/pagebroker"]
