@@ -13,8 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Both languages read the same fixed wire vectors. Changing a tag or dropping a
-// field must fail here even when a same-version round trip would still succeed.
+// Shared Go/C++ wire fixtures catch tag changes that round trips would miss.
 func TestSharedProtocolFixtures(t *testing.T) {
 	data, err := os.ReadFile("../../pagebroker/testdata/storage-contract/wire.json")
 	if err != nil {
