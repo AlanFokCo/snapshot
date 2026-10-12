@@ -17,6 +17,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func isTransportError(err error) bool {
+	var transport transportError
+	return errors.As(err, &transport)
+}
+
 func testPublication() *PublishedArtifact {
 	return &PublishedArtifact{
 		StoreId:        "store-v1-" + strings.Repeat("a", 64),
