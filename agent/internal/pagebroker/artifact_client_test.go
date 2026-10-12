@@ -19,9 +19,8 @@ import (
 
 func testPublication() *PublishedArtifact {
 	return &PublishedArtifact{
-		StoreId:               "store-v1-" + strings.Repeat("a", 64),
-		ArtifactHandle:        "artifacts/content-1/containers/main/index.json",
-		ArtifactFormatVersion: "snapshot.pagebroker/v1",
+		StoreId:        "store-v1-" + strings.Repeat("a", 64),
+		ArtifactHandle: "artifacts/content-1/containers/main/index.json",
 	}
 }
 
@@ -169,7 +168,6 @@ func TestArtifactResponsesRejectInvalidResults(t *testing.T) {
 		{"missing descriptor", func(r *Response) { r.GetCommitComplete().PublishedArtifact = nil }},
 		{"missing store", func(r *Response) { r.GetCommitComplete().PublishedArtifact.StoreId = "" }},
 		{"missing handle", func(r *Response) { r.GetCommitComplete().PublishedArtifact.ArtifactHandle = "" }},
-		{"missing version", func(r *Response) { r.GetCommitComplete().PublishedArtifact.ArtifactFormatVersion = "" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := artifactTestServer(t, func(connection net.Conn, request *Request) error {
@@ -281,7 +279,7 @@ func TestMetadataRejectsOtherOrEmptyResults(t *testing.T) {
 func TestArtifactRequestsValidateBeforeConnecting(t *testing.T) {
 	client := Client{ControlSocketPath: "/nonexistent-pagebroker.sock"}
 	ctx := context.Background()
-	for _, artifact := range []*PublishedArtifact{nil, {}, {StoreId: "store"}, {StoreId: "store", ArtifactHandle: "handle"}} {
+	for _, artifact := range []*PublishedArtifact{nil, {}, {StoreId: "store"}, {ArtifactHandle: "handle"}} {
 		_, err := client.GetArtifactMetadata(ctx, "tx", artifact)
 		if err == nil || isTransportError(err) {
 			t.Fatalf("invalid metadata input: %v", err)

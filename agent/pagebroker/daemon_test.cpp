@@ -1088,7 +1088,6 @@ TEST_F(BrokerTest, RejectsArtifactRestoreBeforeReadingOrLegacyFallback)
     auto* artifact = operation->mutable_artifact();
     artifact->set_store_id("store-v1-" + std::string(64, 'a'));
     artifact->set_artifact_handle("artifacts/content-1/containers/main");
-    artifact->set_artifact_format_version("snapshot.pagebroker/v1");
     if (legacy)
       Configure(operation->mutable_source(), operation->mutable_io_engine(), source_);
     const auto rejected = broker().HandleRequest(request);
@@ -1123,7 +1122,6 @@ TEST_F(BrokerTest, MetadataIsExplicitlyUnsupportedWithoutCreatingTransaction)
   auto* artifact = request.mutable_get_artifact_metadata()->mutable_artifact();
   artifact->set_store_id("store-v1-" + std::string(64, 'a'));
   artifact->set_artifact_handle("artifacts/content-1/containers/main");
-  artifact->set_artifact_format_version("snapshot.pagebroker/v1");
   const auto rejected = broker().HandleRequest(request);
   ASSERT_TRUE(rejected.has_failure());
   EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);

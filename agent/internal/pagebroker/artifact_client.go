@@ -80,8 +80,8 @@ func (c Client) GetArtifactMetadata(ctx context.Context, transactionID string, a
 }
 
 func validatePublishedArtifact(artifact *PublishedArtifact) error {
-	if artifact.GetStoreId() == "" || artifact.GetArtifactHandle() == "" || artifact.GetArtifactFormatVersion() == "" {
-		return fmt.Errorf("PageBroker publication requires store ID, artifact handle and format version")
+	if artifact.GetStoreId() == "" || artifact.GetArtifactHandle() == "" {
+		return fmt.Errorf("PageBroker publication requires store ID and artifact handle")
 	}
 	return nil
 }
