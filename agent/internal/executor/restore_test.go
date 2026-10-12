@@ -803,6 +803,117 @@ func (m *cleanupMounter) MountArtifact(context.Context, nsmount.MountPoint, stri
 	return nil, errors.New("unexpected artifact mount")
 }
 
+func TestRestoreSkipsAbortAfterFailedConnection(t *testing.T) {
+	base := t.TempDir()
+	artifact, err := nsmount.ResolveArtifactPath(base, "content", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(artifact, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := &types.CheckpointManifest{Artifact: types.ArtifactManifest{ContentUID: "content", ContainerName: "main"}}
+	if err := types.WriteManifest(artifact, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	// A permanent dial error (ENOTDIR): the control socket path has a regular
+	// file where a directory belongs. No listener ever runs, so an Abort
+	// attempt here would surface as a second "abort PageBroker restore" error.
+	regularFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(regularFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(regularFile, "pagebroker.sock")
+
+	ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+	defer cancel()
+	var events []string
+	mounts := &restoreSourceMounter{events: &events}
+	_, err = Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		PageBrokerControlSocketPath: socketPath, SkipCompatCheck: true,
+	}, mounts)
+	if err == nil || !strings.Contains(err.Error(), "prepare PageBroker restore") {
+		t.Fatalf("restore error = %v, want a prepare failure", err)
+	}
+	if strings.Contains(err.Error(), "abort PageBroker restore") {
+		t.Fatalf("restore error = %v, want no Abort attempt after a failed connection", err)
+	}
+}
+
+func TestRestoreReturnsBothRestoreAndAbortErrorsOnCleanupFailure(t *testing.T) {
+	base := t.TempDir()
+	directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+	if err := types.WriteManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	listener := listenPageBroker(t)
+	server := make(chan error, 1)
+	go func() {
+		// Stage: succeed, so nsrestore runs and fails (no real nsrestore binary).
+		// Abort: close without a reply, so the Abort below also fails.
+		connection, err := listener.Accept()
+		if err != nil {
+			server <- err
+			return
+		}
+		request, err := readPageBrokerTestRequest(connection)
+		if err != nil {
+			connection.Close()
+			server <- err
+			return
+		}
+		response := &pagebroker.Response{
+			Result: &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &directory}},
+		}
+		if err := replyPageBrokerTest(connection, request, response); err != nil {
+			connection.Close()
+			server <- err
+			return
+		}
+		connection.Close()
+
+		connection, err = listener.Accept()
+		if err != nil {
+			server <- err
+			return
+		}
+		if _, err := readPageBrokerTestRequest(connection); err != nil {
+			connection.Close()
+			server <- err
+			return
+		}
+		connection.Close() // No reply: the client's Abort fails.
+		server <- nil
+	}()
+
+	mounts := &cleanupMounter{events: make(chan string, 8)}
+	ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+	defer cancel()
+	_, err = Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		PageBrokerControlSocketPath: listener.Addr().String(),
+		PageBrokerRestoreMode:       "staged", SkipCompatCheck: true,
+	}, mounts)
+	if err == nil || !strings.Contains(err.Error(), "nsrestore failed") {
+		t.Fatalf("restore error = %v, want the nsrestore failure", err)
+	}
+	if !strings.Contains(err.Error(), "abort PageBroker restore") {
+		t.Fatalf("restore error = %v, want the Abort failure joined in too", err)
+	}
+	waitPageBrokerTest(t, server)
+}
+
 func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 	const gpuUUID = "GPU-11111111-1111-1111-1111-111111111111"
 	for _, mode := range []string{"cpu", "invalid-context", "custom-storage"} {
