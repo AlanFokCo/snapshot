@@ -11,11 +11,11 @@
 #
 # Usage: ci-cache-flags.sh <read|write> <image> <branch>
 #
-#   read   one --cache-from for the branch, and one for main behind it, so a
-#          pull request against a release branch still starts from main's
-#          layers when its own tag is missing or new. Pull requests never
-#          write: a cache a pull request can write is a cache a fork can
-#          poison.
+#   read   one --cache-from for the branch, one for main behind it so a pull
+#          request against a release branch still starts from main's layers
+#          when its own tag is missing or new, and one for the pre-keying tag
+#          behind both. Pull requests never write: a cache a pull request can
+#          write is a cache a fork can poison.
 #   write  --cache-from and --cache-to for the branch. Only main and release/*
 #          reach this, from push-artifacts.yaml.
 #
@@ -64,6 +64,12 @@ fi
 ref="${CACHE_REF_PREFIX}:${IMAGE}-${branch_slug}${SUFFIX}"
 main_ref="${CACHE_REF_PREFIX}:${IMAGE}-main${SUFFIX}"
 
+# The tag the cache used before it was keyed by branch. Nothing writes it any
+# more, so it only ages out; it is read so the branch-keyed tags being empty
+# until main first publishes them does not send every build cold in the
+# meantime. Remove once a push to main has written the keyed tags.
+legacy_ref="${CACHE_REF_PREFIX}:${IMAGE}${SUFFIX}"
+
 case "$MODE" in
 read)
     printf '%s' "--cache-from=type=registry,ref=${ref}"
@@ -72,6 +78,7 @@ read)
     if [ "$ref" != "$main_ref" ]; then
         printf ' %s' "--cache-from=type=registry,ref=${main_ref}"
     fi
+    printf ' %s' "--cache-from=type=registry,ref=${legacy_ref}"
     ;;
 write)
     # image-manifest and oci-mediatypes because GHCR rejects buildkit's
