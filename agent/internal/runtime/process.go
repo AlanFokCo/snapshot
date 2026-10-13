@@ -52,15 +52,13 @@ func ReadCPUFeatures(hostProcPath string) ([]string, error) {
 	}
 
 	counts := make(map[string]int)
+	var features []string
 	for _, cpu := range cpus {
 		for _, feature := range compat.InstructionSetFeatures(cpu.Flags) {
 			counts[feature]++
-		}
-	}
-	var features []string
-	for feature, count := range counts {
-		if count == len(cpus) {
-			features = append(features, feature)
+			if counts[feature] == len(cpus) {
+				features = append(features, feature)
+			}
 		}
 	}
 	if len(features) == 0 {
