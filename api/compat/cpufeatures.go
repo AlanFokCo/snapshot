@@ -43,9 +43,6 @@ func featureSet(names string) map[string]bool {
 // differ between nodes a process moves between freely, so comparing them would
 // refuse restores that work. A CPU with none of them is unknown, so the result
 // is then nil.
-//
-// Exported so that what a checkpoint records is the same reduction this
-// compares, rather than a second one that can disagree with it.
 func InstructionSetFeatures(flags []string) []string {
 	seen := make(map[string]bool, len(flags))
 	var features []string
