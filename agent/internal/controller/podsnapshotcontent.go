@@ -54,7 +54,11 @@ type CheckpointParams struct {
 // single container this phase; the count is asserted here so a violated invariant becomes a
 // terminal InvalidTargetContainer status rather than an out-of-bounds panic in the node agent.
 func singleTargetContainer(content *snapshotv1alpha1.PodSnapshotContent) (string, error) {
-	containers := content.Spec.Source.PodRef.Containers
+	return singleContainer(content.Spec.Source.PodRef.Containers)
+}
+
+// singleContainer returns the one container a source podRef names.
+func singleContainer(containers []string) (string, error) {
 	if len(containers) != 1 {
 		return "", fmt.Errorf("source podRef must reference exactly one container, got %d", len(containers))
 	}

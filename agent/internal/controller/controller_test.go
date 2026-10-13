@@ -52,6 +52,8 @@ type fakeRuntime struct {
 	containerIDByPod     string
 	resolvedContainerIDs []string
 	resolveContainerPID  int
+	// podUID is the Pod's UID on the node, as the runtime reports it.
+	podUID string
 }
 
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
@@ -80,6 +82,15 @@ func (r *fakeRuntime) ResolveContainerByPod(_ context.Context, _, _, _ string) (
 }
 
 func (r *fakeRuntime) ResolveContainerImageID(_ context.Context, _ string) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func (r *fakeRuntime) ResolveContainerPodUID(_ context.Context, _ string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.podUID != "" {
+		return r.podUID, nil
+	}
 	return "", errors.New("not implemented")
 }
 
@@ -356,6 +367,11 @@ func readySnapshotObjects() (*snapshotv1alpha1.PodSnapshot, *snapshotv1alpha1.Po
 	contentName := "podsnapshotcontent-snapshot-uid"
 	snapshot := &snapshotv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-a", Namespace: "inference", UID: ktypes.UID("snapshot-uid")},
+		Spec: snapshotv1alpha1.PodSnapshotSpec{
+			Source: snapshotv1alpha1.PodSnapshotSource{
+				PodRef: snapshotv1alpha1.PodReference{Name: "source", Containers: []string{"main"}},
+			},
+		},
 		Status: snapshotv1alpha1.PodSnapshotStatus{
 			BoundPodSnapshotContentName: &contentName,
 			Conditions: []metav1.Condition{{
@@ -1763,32 +1779,44 @@ func TestRunRestoreIgnoresPlaceholderThatAlreadyExited(t *testing.T) {
 
 // When the container cannot be resolved, nothing can be killed, so the
 // restore-failed marker goes through the host path of the control volume.
+// kubelet names that path after the Pod's UID on the node, which in a vCluster
+// differs from the UID of the Pod the agent sees.
 func TestRunRestoreFailureMarksUnresolvedContainerThroughHostPath(t *testing.T) {
-	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
-	w := makeTestController(t, pod)
-	w.runtime = &fakeRuntime{} // ResolveContainer fails
-	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
-	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
-		return executor.RestoreResult{}, errors.New("criu restore failed")
-	}
-	var written []string
-	w.writePodControlSentinelFn = func(podUID, container, name string, _ []byte) error {
-		written = append(written, podUID+"/"+container+"/"+name)
-		return nil
-	}
-	w.writeControlSentinelFn = func(int, string, []byte) error {
-		t.Error("no PID was resolved, so nothing may write through /host/proc")
-		return nil
-	}
-	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
-		t.Error("no PID was resolved, so nothing may be killed")
-		return nil
-	}
+	for name, tc := range map[string]struct {
+		runtimePodUID string
+		want          string
+	}{
+		"the runtime knows the Pod's UID on the node": {runtimePodUID: "host-uid", want: "host-uid"},
+		"the runtime cannot tell":                     {want: "restore-pod-uid"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+			w := makeTestController(t, pod)
+			w.runtime = &fakeRuntime{podUID: tc.runtimePodUID} // ResolveContainer fails
+			artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
+			w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+				return executor.RestoreResult{}, errors.New("criu restore failed")
+			}
+			var written []string
+			w.writePodControlSentinelFn = func(podUID, container, name string, _ []byte) error {
+				written = append(written, podUID+"/"+container+"/"+name)
+				return nil
+			}
+			w.writeControlSentinelFn = func(int, string, []byte) error {
+				t.Error("no PID was resolved, so nothing may write through /host/proc")
+				return nil
+			}
+			w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+				t.Error("no PID was resolved, so nothing may be killed")
+				return nil
+			}
 
-	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
+			err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
 
-	require.Error(t, err)
-	assert.Equal(t, []string{"restore-pod-uid/main/" + podcontract.RestoreFailedFile}, written)
+			require.Error(t, err)
+			assert.Equal(t, []string{tc.want + "/main/" + podcontract.RestoreFailedFile}, written)
+		})
+	}
 }
 
 func TestRestoreDestinations(t *testing.T) {
@@ -1811,6 +1839,18 @@ func TestRestoreDestinations(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.Equal(t, []string{content.Spec.Source.PodRef.Containers[0]}, got)
+	})
+
+	t.Run("without a map a PodSnapshot still being taken is enough", func(t *testing.T) {
+		pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+		snapshot, _ := readySnapshotObjects()
+		snapshot.Status = snapshotv1alpha1.PodSnapshotStatus{} // not Ready, no content bound
+		w := makeTestController(t, pod, snapshot)
+
+		got, err := w.RestoreDestinations(context.Background(), pod)
+
+		require.NoError(t, err)
+		assert.Equal(t, snapshot.Spec.Source.PodRef.Containers, got)
 	})
 
 	t.Run("without a map a missing PodSnapshot is an error", func(t *testing.T) {

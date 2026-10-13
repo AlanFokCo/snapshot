@@ -270,8 +270,10 @@ spec:
           hostPath:
             path: /var/lib/kubelet/pods
             type: Directory
-        # NRI socket directory. A directory, not the socket itself, so the
-        # agent still starts on a node where the runtime has NRI turned off.
+        # NRI socket directory. A directory, not the socket itself: a
+        # socket-typed hostPath would keep the Pod from starting at all, and
+        # hide the reason. On a node without NRI the agent starts, cannot
+        # register its NRI plugin, and exits with an error saying so.
         - name: nri
           hostPath:
             path: /var/run/nri

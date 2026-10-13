@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/go-logr/logr/testr"
@@ -216,4 +217,18 @@ func TestInstallProxyReplacesAnEarlierCopy(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "no temporary file may be left behind")
+}
+
+// Restores need NRI, so the agent stops when the runtime has none.
+func TestRunFailsWithoutNRI(t *testing.T) {
+	p, _ := testPlugin(t, &fakeResolver{})
+	p.socketPath = filepath.Join(t.TempDir(), "nri.sock") // nothing listens here
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := p.Run(ctx)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not register with the container runtime")
+	assert.NoError(t, ctx.Err(), "fails at once, without waiting")
 }

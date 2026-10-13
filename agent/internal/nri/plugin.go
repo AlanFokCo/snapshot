@@ -43,7 +43,9 @@ const (
 	ProxyBinaryPath = nsmount.SnapshotBinSrc + "/" + podcontract.RestoreProxyBinaryName
 
 	// lookupTimeout bounds the API read for Pods without a container map. It
-	// runs inside the runtime's CreateContainer call, which NRI also bounds.
+	// runs inside the runtime's CreateContainer call. NRI gives that whole call
+	// 2 s by default, and drops a plugin that takes longer, so the read gets
+	// 1 s and copying the proxy the rest.
 	lookupTimeout = time.Second
 )
 
@@ -70,16 +72,19 @@ type Plugin struct {
 	resolver      DestinationResolver
 	log           logr.Logger
 	hostNamespace string
-	// openControlDir and proxyPath are replaced in tests.
+	// openControlDir, proxyPath and socketPath are replaced in tests. An
+	// empty socketPath is NRI's default.
 	openControlDir func(podUID, containerName string) (*os.File, error)
 	proxyPath      string
+	socketPath     string
 }
 
 // NewPlugin returns a plugin that resolves destinations through resolver. If
 // hostNamespace is set, the plugin acts only on Pods in that namespace on the
-// node. Tests set it, to share nodes with other clusters: the runtime calls
-// every plugin for every Pod on the node, and restore Pods of another cluster
-// would fail here. One vCluster's Pods all run in one host namespace.
+// node. Set it when other clusters share the nodes, such as vCluster tenants:
+// the runtime calls every plugin for every Pod on the node, and restore Pods of
+// another cluster would fail here. One vCluster's Pods all run in one host
+// namespace.
 func NewPlugin(resolver DestinationResolver, log logr.Logger, hostNamespace string) *Plugin {
 	return &Plugin{
 		resolver:       resolver,
@@ -91,33 +96,40 @@ func NewPlugin(resolver DestinationResolver, log logr.Logger, hostNamespace stri
 }
 
 // Run registers with the runtime and serves until ctx ends. It returns an
-// error if registration fails or the connection to the runtime drops: a node
-// that cannot shape restore containers must not look healthy.
+// error if registration fails or the connection to the runtime drops, and the
+// agent then exits: restores need NRI, so a node without it must not look
+// healthy, and checkpoints taken there could not be restored on it either.
 func (p *Plugin) Run(ctx context.Context) error {
 	closed := make(chan struct{})
 	var once sync.Once
-	s, err := stub.New(p,
+	opts := []stub.Option{
 		stub.WithPluginName(PluginName),
 		stub.WithPluginIdx(PluginIndex),
 		stub.WithOnClose(func() { once.Do(func() { close(closed) }) }),
-	)
+	}
+	if p.socketPath != "" {
+		opts = append(opts, stub.WithSocketPath(p.socketPath))
+	}
+	s, err := stub.New(p, opts...)
 	if err != nil {
 		return fmt.Errorf("create NRI plugin: %w", err)
 	}
-	ran := make(chan error, 1)
-	go func() { ran <- s.Run(ctx) }()
+	if err := s.Start(ctx); err != nil {
+		return fmt.Errorf("NRI plugin could not register with the container runtime; "+
+			"restores need NRI, so the agent stops. Enable NRI in the runtime, or keep the agent off this node: %w", err)
+	}
 	select {
-	case <-closed:
+	case <-ctx.Done():
 		s.Stop()
-		return errors.New("NRI connection to the container runtime closed")
-	case err := <-ran:
+		return nil
+	case <-closed:
+		// Stopping the stub also closes the connection, so a shutdown can
+		// land here too.
+		s.Stop()
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err == nil {
-			err = errors.New("stopped")
-		}
-		return fmt.Errorf("NRI plugin: %w", err)
+		return errors.New("NRI connection to the container runtime closed")
 	}
 }
 

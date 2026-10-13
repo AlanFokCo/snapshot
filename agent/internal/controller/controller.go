@@ -615,9 +615,10 @@ func validatePodSnapshotContentForRestore(content *snapshotv1alpha1.PodSnapshotC
 
 // RestoreDestinations returns the names of the containers a restore Pod
 // restores into. When the Pod carries no container map, the destination is the
-// captured container, which only the bound PodSnapshotContent records, so that
-// case reads the PodSnapshot and its content. It checks nothing else: the
-// restore itself still runs the full preflight.
+// captured container, which the PodSnapshot's spec names. That spec is set at
+// creation and immutable, so this works while the snapshot is still being
+// taken. It checks nothing else: the restore itself still runs the full
+// preflight, including the bound PodSnapshotContent.
 func (w *NodeController) RestoreDestinations(ctx context.Context, pod *corev1.Pod) ([]string, error) {
 	source := ""
 	if _, mapped := pod.Annotations[podcontract.RestoreContainerMapAnnotation]; !mapped {
@@ -625,11 +626,7 @@ func (w *NodeController) RestoreDestinations(ctx context.Context, pod *corev1.Po
 		if err != nil {
 			return nil, err
 		}
-		content, err := w.getPodSnapshotContentFromSnapshot(ctx, pod, snapshot)
-		if err != nil {
-			return nil, err
-		}
-		if source, err = singleTargetContainer(content); err != nil {
+		if source, err = singleContainer(snapshot.Spec.Source.PodRef.Containers); err != nil {
 			return nil, err
 		}
 	}
@@ -1053,8 +1050,16 @@ func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) e
 		// Nothing can be killed, so the marker is the only way the container's
 		// proxy learns that no restore is coming. With no process in the
 		// container to write through, it goes through the node's path of the
-		// control volume.
-		if markErr := w.writePodControlSentinelFn(string(op.pod.UID), op.destination, podcontract.RestoreFailedFile, restoreFailedSentinelContents); markErr != nil {
+		// control volume. kubelet names that path after the Pod's UID on the
+		// node, which in a vCluster differs from this Pod's; the runtime knows
+		// it while the container exists.
+		podUID := string(op.pod.UID)
+		if nodeUID, uidErr := w.runtime.ResolveContainerPodUID(ctx, op.containerID); uidErr == nil {
+			podUID = nodeUID
+		} else {
+			op.log.V(1).Info("Cannot read the Pod's UID on the node; using its own", "error", uidErr.Error())
+		}
+		if markErr := w.writePodControlSentinelFn(podUID, op.destination, podcontract.RestoreFailedFile, restoreFailedSentinelContents); markErr != nil {
 			op.log.Error(markErr, "Failed to write restore-failed sentinel through the host path")
 		}
 		return errors.Join(restoreErr, fmt.Errorf("placeholder PID could not be resolved after restore failure: %w", err))

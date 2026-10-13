@@ -5,8 +5,9 @@ suite: restore proxy NRI plugin
 templates:
   - templates/daemonset.yaml
 tests:
-  # The directory, not the socket: a socket-typed hostPath would keep the agent
-  # from starting on nodes where the runtime has NRI turned off.
+  # The directory, not the socket: on a node without NRI, a socket-typed
+  # hostPath would keep the Pod from starting and hide the reason. The agent
+  # starts instead, and exits with an error saying NRI is missing.
   - it: mounts the NRI socket directory
     asserts:
       - contains:

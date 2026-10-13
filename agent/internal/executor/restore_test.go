@@ -289,6 +289,10 @@ func (r *restoreFakeRuntime) ResolveContainerImageID(_ context.Context, _ string
 	return r.imageID, r.imageIDError
 }
 
+func (r *restoreFakeRuntime) ResolveContainerPodUID(context.Context, string) (string, error) {
+	return "", errors.New("not implemented")
+}
+
 func (r *restoreFakeRuntime) TerminateContainer(context.Context, string) error {
 	return errors.New("not implemented")
 }
