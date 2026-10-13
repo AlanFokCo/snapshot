@@ -24,12 +24,8 @@ var cpuArchCheck = check{
 	compare: func(source, target Environment) []Mismatch { return mustMatch(source.CPUArch, target.CPUArch) },
 }
 
-// CheckCPUFeatures refuses a restore onto a CPU missing an instruction set the
-// checkpoint's CPU had. glibc and the numeric libraries pick their code paths
-// from CPUID once, when the process starts, and a restored process keeps those
-// picks: on a CPU without the instructions it dies of SIGILL the first time it
-// reaches one, after the restore has already reported success. A target with
-// more instruction sets than the source is fine.
+// CheckCPUFeatures refuses a CPU missing an instruction set the source had: the
+// restored process keeps its startup code paths and would die of SIGILL.
 const CheckCPUFeatures Check = "cpu-features"
 
 var cpuFeaturesCheck = check{
@@ -52,8 +48,7 @@ var cpuFeaturesCheck = check{
 		if len(missing) == 0 {
 			return nil
 		}
-		// One mismatch naming every missing flag: an AVX-512 source alone
-		// can be missing a dozen, and the condition has to stay readable.
+		// One mismatch, since an AVX-512 source alone can miss a dozen flags.
 		return []Mismatch{{Source: strings.Join(missing, ","), Target: "missing"}}
 	},
 }
