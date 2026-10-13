@@ -115,9 +115,8 @@ async def main() -> None:
     print(f"vLLM pre-checkpoint output={text!r}", flush=True)
 
     await engine.pause_generation()
-    await engine.sleep(level=1)
-    # Keep weights on the GPU for capture, while leaving KV cache released.
-    await engine.wake_up(tags=["weights"])
+    # Discard the KV cache and keep weights on the GPU for capture.
+    await engine.release_kv_cache_memory()
     CONTROL_DIR.joinpath("ready-for-snapshot").write_text(
         "ready\n",
         encoding="utf-8",
