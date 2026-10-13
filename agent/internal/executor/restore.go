@@ -278,8 +278,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	direct := req.PageBrokerRestoreMode != "staged"
 	var staged string
 	preparationAttempted = true
-	if usePageBrokerGPU {
-		staged, gpu, err = broker.PrepareGPURestore(ctx, transactionID, artifactPath, direct, gpuContext)
+	if usePageBrokerGPU && direct {
+		gpu, err = broker.PrepareGPUDirectRestore(ctx, transactionID, artifactPath, gpuContext)
+	} else if usePageBrokerGPU {
+		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext)
 	} else if direct {
 		err = broker.DirectRestore(ctx, transactionID, artifactPath)
 	} else {
@@ -651,22 +653,25 @@ func addCustomStorageFiles(ctx context.Context, cmd *exec.Cmd, execution *pagebr
 		_ = cancelWrite.Close()
 		return nil
 	}
-	socketDirectoryFD := firstExtraFileDescriptor + len(cmd.ExtraFiles)
-	hostProcFD := socketDirectoryFD + 1
-	socketFD := socketDirectoryFD + 2
-	cancelFD := socketDirectoryFD + 3
-	brokerProcessFD := socketDirectoryFD + 4
+	inherited := []struct {
+		flag string
+		file *os.File
+	}{
+		{"--pagebroker-socket-directory-fd", execution.SocketDirectory},
+		{"--host-proc-fd", hostProc},
+		{"--pagebroker-execution-fd", execution.Socket},
+		{"--cancel-fd", cancelRead},
+		{"--pagebroker-process-fd", execution.BrokerProcess},
+	}
+	for _, item := range inherited {
+		cmd.Args = append(cmd.Args, item.flag, strconv.Itoa(firstExtraFileDescriptor+len(cmd.ExtraFiles)))
+		cmd.ExtraFiles = append(cmd.ExtraFiles, item.file)
+	}
 	cmd.Args = append(cmd.Args,
 		"--pagebroker-transaction", execution.TransactionID,
-		"--pagebroker-socket-directory-fd", strconv.Itoa(socketDirectoryFD),
-		"--host-proc-fd", strconv.Itoa(hostProcFD),
-		"--pagebroker-execution-fd", strconv.Itoa(socketFD),
-		"--cancel-fd", strconv.Itoa(cancelFD),
-		"--pagebroker-process-fd", strconv.Itoa(brokerProcessFD),
 		"--pagebroker-socket-name", execution.SocketName,
 		"--gpu-context", string(gpuContext),
 	)
-	cmd.ExtraFiles = append(cmd.ExtraFiles, execution.SocketDirectory, hostProc, execution.Socket, cancelRead, execution.BrokerProcess)
 	return func() {
 		stopCancel()
 		cancelRead.Close()

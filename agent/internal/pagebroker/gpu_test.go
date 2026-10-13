@@ -492,7 +492,7 @@ func TestGPUParentRetainsOriginalPeerAfterChildExit(t *testing.T) {
 				}
 			}
 			await("ready")
-			_, gpu, err := (Client{ControlSocketPath: socketPath}).PrepareGPURestore(context.Background(), "restore", "/checkpoint", true, &GpuContext{})
+			gpu, err := (Client{ControlSocketPath: socketPath}).PrepareGPUDirectRestore(context.Background(), "restore", "/checkpoint", &GpuContext{})
 			if err != nil {
 				t.Fatal(err)
 			}

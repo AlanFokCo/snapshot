@@ -37,9 +37,7 @@ type Client struct {
 }
 
 func (c Client) StagedRestore(ctx context.Context, transactionID, source string) (string, error) {
-	response, err := c.request(ctx, transactionID, &Request_StagedRestore{
-		StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
-	})
+	response, err := c.request(ctx, transactionID, stagedRestore(source))
 	if err != nil {
 		return "", err
 	}
@@ -59,22 +57,15 @@ func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destinatio
 // DirectRestore prepares a transaction against the original checkpoint directory.
 // The caller must keep its contents available until Commit or Abort.
 func (c Client) DirectRestore(ctx context.Context, transactionID, source string) error {
-	response, err := c.request(ctx, transactionID, &Request_DirectRestore{
-		DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
-	})
+	response, err := c.request(ctx, transactionID, directRestore(source))
 	if err != nil {
 		return err
 	}
-	if response.GetDirectRestoreReady() == nil {
-		return fmt.Errorf("unexpected PageBroker direct restore response")
-	}
-	return nil
+	return directRestoreReady(response)
 }
 
 func (c Client) PrepareDirectCheckpoint(ctx context.Context, transactionID, destination string) (string, error) {
-	response, err := c.request(ctx, transactionID, &Request_PrepareDirectCheckpoint{
-		PrepareDirectCheckpoint: &PrepareDirectCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},
-	})
+	response, err := c.request(ctx, transactionID, prepareDirectCheckpoint(destination))
 	if err != nil {
 		return "", err
 	}
@@ -86,6 +77,13 @@ func imageDirectory(directory string) (string, error) {
 		return "", fmt.Errorf("unexpected PageBroker staging response")
 	}
 	return directory, nil
+}
+
+func directRestoreReady(response *Response) error {
+	if response.GetDirectRestoreReady() == nil {
+		return fmt.Errorf("unexpected PageBroker direct restore response")
+	}
+	return nil
 }
 
 func (c Client) Commit(ctx context.Context, transactionID string) error {
@@ -168,21 +166,14 @@ func (c Client) dial(ctx context.Context) (net.Conn, error) {
 }
 
 func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
-	response, brokerProcess, err := c.requestResponse(ctx, transactionID, false, command, files...)
-	if brokerProcess != nil {
-		_ = brokerProcess.Close()
-	}
+	response, _, err := c.requestResponse(ctx, transactionID, &Request{Command: command}, files...)
 	return response, err
 }
 
-func (c Client) requestWithProcess(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
-	return c.requestResponse(ctx, transactionID, true, command, files...)
-}
-
-func (c Client) requestResponse(ctx context.Context, transactionID string, requestBrokerPidfd bool, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
+func (c Client) requestResponse(ctx context.Context, transactionID string, request *Request, files ...*os.File) (*Response, *os.File, error) {
 	var connection net.Conn
 	var err error
-	if _, startup := command.(*Request_Capabilities); startup {
+	if request.GetCapabilities() != nil {
 		// Startup owns its retry budget and must see permanent endpoint errors immediately.
 		connection, err = (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
 	} else {
@@ -192,18 +183,16 @@ func (c Client) requestResponse(ctx context.Context, transactionID string, reque
 		return nil, nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err), dial: true}
 	}
 	defer connection.Close()
-	return exchangeResponse(ctx, connection.(*net.UnixConn), transactionID, requestBrokerPidfd, command, files...)
+	return exchangeResponse(ctx, connection.(*net.UnixConn), transactionID, request, files...)
 }
 
 func exchange(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
-	response, brokerProcess, err := exchangeResponse(ctx, connection, transactionID, false, command, files...)
-	if brokerProcess != nil {
-		_ = brokerProcess.Close()
-	}
+	response, _, err := exchangeResponse(ctx, connection, transactionID, &Request{Command: command}, files...)
 	return response, err
 }
 
-func exchangeResponse(ctx context.Context, connection *net.UnixConn, transactionID string, requestBrokerPidfd bool, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
+// exchangeResponse returns a broker pidfd only when the request sets RequestBrokerPidfd.
+func exchangeResponse(ctx context.Context, connection *net.UnixConn, transactionID string, request *Request, files ...*os.File) (*Response, *os.File, error) {
 	stopCancel := context.AfterFunc(ctx, func() {
 		_ = connection.CloseWrite()
 		_ = connection.Close()
@@ -211,7 +200,7 @@ func exchangeResponse(ctx context.Context, connection *net.UnixConn, transaction
 	defer stopCancel()
 
 	requestID := uuid.NewString()
-	request := &Request{RequestId: &requestID, Command: command, RequestBrokerPidfd: requestBrokerPidfd}
+	request.RequestId = &requestID
 	if transactionID != "" {
 		request.TransactionId = &transactionID
 	}
@@ -247,21 +236,31 @@ func exchangeResponse(ctx context.Context, connection *net.UnixConn, transaction
 	if failure := response.GetFailure(); failure != nil {
 		return nil, nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
 	}
-	if len(receivedFiles) > 1 {
+	if len(receivedFiles) > 1 || (len(receivedFiles) == 1 && !request.GetRequestBrokerPidfd()) {
 		return nil, nil, fmt.Errorf("unexpected PageBroker response descriptors")
 	}
 	if len(receivedFiles) == 0 {
 		return response, nil, nil
-	}
-	if response.GetDirectCheckpointDirectory() == nil && response.GetStagedCheckpointDirectory() == nil &&
-		response.GetDirectRestoreReady() == nil && response.GetStagedRestoreDirectory() == nil {
-		return nil, nil, fmt.Errorf("broker pidfd is only allowed on preparation responses")
 	}
 	if err := unix.PidfdSendSignal(receivedFiles[0], 0, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EPERM) {
 		return nil, nil, fmt.Errorf("invalid PageBroker process descriptor: %w", err)
 	}
 	retained = true
 	return response, os.NewFile(uintptr(receivedFiles[0]), "pagebroker-process"), nil
+}
+
+func stagedRestore(source string) isRequest_Command {
+	return &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()}}
+}
+
+func directRestore(source string) isRequest_Command {
+	return &Request_DirectRestore{DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()}}
+}
+
+func prepareDirectCheckpoint(destination string) isRequest_Command {
+	return &Request_PrepareDirectCheckpoint{
+		PrepareDirectCheckpoint: &PrepareDirectCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},
+	}
 }
 
 func filesystem(directory string) *StorageBackend {

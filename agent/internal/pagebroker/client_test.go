@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -607,6 +608,57 @@ func TestTruncatedPreparationClosesReceivedProcessDescriptor(t *testing.T) {
 	_, files, err := readMessageWithFiles(connection)
 	if !errors.Is(err, io.EOF) || len(files) != 0 {
 		t.Fatalf("truncated preparation: files=%v, error=%v", files, err)
+	}
+	if err := <-server; err != nil {
+		t.Fatal(err)
+	}
+	if after := countProcessDescriptors(t); after != before {
+		t.Fatalf("process descriptor leak: before %d, after %d", before, after)
+	}
+}
+
+func TestUnrequestedProcessDescriptorIsRejectedAndClosed(t *testing.T) {
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(t.TempDir(), "broker.sock"), Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	process := openTestPidfd(t)
+	before := countProcessDescriptors(t)
+	server := make(chan error, 1)
+	go func() {
+		connection, err := listener.AcceptUnix()
+		if err != nil {
+			server <- err
+			return
+		}
+		defer connection.Close()
+		request, err := readRequest(connection)
+		if err != nil {
+			server <- err
+			return
+		}
+		directory := "/checkpoints/prepared"
+		message, err := proto.Marshal(&Response{
+			RequestId:     request.RequestId,
+			TransactionId: request.TransactionId,
+			Result:        &Response_DirectCheckpointDirectory{DirectCheckpointDirectory: &DirectCheckpointDirectory{ImageDirectory: &directory}},
+		})
+		if err != nil {
+			server <- err
+			return
+		}
+		header := binary.BigEndian.AppendUint32(nil, uint32(len(message)))
+		if _, _, err := connection.WriteMsgUnix(header, unix.UnixRights(int(process.Fd())), nil); err != nil {
+			server <- err
+			return
+		}
+		_, err = connection.Write(message)
+		server <- err
+	}()
+	_, err = (Client{ControlSocketPath: listener.Addr().String()}).PrepareDirectCheckpoint(context.Background(), "transaction", "/checkpoints/destination")
+	if err == nil || !strings.Contains(err.Error(), "unexpected PageBroker response descriptors") {
+		t.Fatalf("unrequested broker pidfd: %v", err)
 	}
 	if err := <-server; err != nil {
 		t.Fatal(err)

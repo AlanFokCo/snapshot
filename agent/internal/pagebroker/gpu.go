@@ -86,9 +86,7 @@ func (c Client) openCustomStorageExecution(transactionID string, gpuContext *Gpu
 
 // PrepareGPUCheckpoint prepares storage and retains the broker that owns the transaction.
 func (c Client) PrepareGPUCheckpoint(ctx context.Context, transactionID, destination string, gpuContext *GpuContext) (string, *CustomStorageExecution, error) {
-	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, &Request_PrepareDirectCheckpoint{
-		PrepareDirectCheckpoint: &PrepareDirectCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},
-	})
+	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, prepareDirectCheckpoint(destination))
 	if err != nil {
 		return "", nil, err
 	}
@@ -100,24 +98,11 @@ func (c Client) PrepareGPUCheckpoint(ctx context.Context, transactionID, destina
 	return directory, execution, nil
 }
 
-// PrepareGPURestore prepares storage and retains the broker before PID namespace entry.
-func (c Client) PrepareGPURestore(ctx context.Context, transactionID, source string, direct bool, gpuContext *GpuContext) (string, *CustomStorageExecution, error) {
-	var command isRequest_Command = &Request_StagedRestore{
-		StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
-	}
-	if direct {
-		command = &Request_DirectRestore{DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()}}
-	}
-	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, command)
+// PrepareGPUStagedRestore prepares a staged image and retains the broker before PID namespace entry.
+func (c Client) PrepareGPUStagedRestore(ctx context.Context, transactionID, source string, gpuContext *GpuContext) (string, *CustomStorageExecution, error) {
+	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, stagedRestore(source))
 	if err != nil {
 		return "", nil, err
-	}
-	if direct {
-		if response.GetDirectRestoreReady() == nil {
-			execution.Close()
-			return "", nil, fmt.Errorf("unexpected PageBroker direct restore response")
-		}
-		return "", execution, nil
 	}
 	directory, err := imageDirectory(response.GetStagedRestoreDirectory().GetImageDirectory())
 	if err != nil {
@@ -127,11 +112,24 @@ func (c Client) PrepareGPURestore(ctx context.Context, transactionID, source str
 	return directory, execution, nil
 }
 
+// PrepareGPUDirectRestore prepares the original checkpoint directory and retains the broker before PID namespace entry.
+func (c Client) PrepareGPUDirectRestore(ctx context.Context, transactionID, source string, gpuContext *GpuContext) (*CustomStorageExecution, error) {
+	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, directRestore(source))
+	if err != nil {
+		return nil, err
+	}
+	if err := directRestoreReady(response); err != nil {
+		execution.Close()
+		return nil, err
+	}
+	return execution, nil
+}
+
 func (c Client) prepareGPUExecution(ctx context.Context, transactionID string, gpuContext *GpuContext, command isRequest_Command) (*Response, *CustomStorageExecution, error) {
 	if gpuContext == nil {
 		return nil, nil, fmt.Errorf("CustomStorage execution requires GPU context")
 	}
-	response, brokerProcess, err := c.requestWithProcess(ctx, transactionID, command)
+	response, brokerProcess, err := c.requestResponse(ctx, transactionID, &Request{Command: command, RequestBrokerPidfd: true})
 	if err != nil {
 		return nil, nil, err
 	}
