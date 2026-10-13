@@ -1146,3 +1146,23 @@ TEST_F(BrokerTest, MetadataIsExplicitlyUnsupportedWithoutCreatingTransaction)
   EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
   EXPECT_TRUE(fs::exists(source_ / "image"));
 }
+
+TEST_F(BrokerTest, CommitAndAbortReportExpiredTransactions)
+{
+  auto request = RequestFor("expired-live");
+  auto* operation = request.mutable_prepare_staged_checkpoint();
+  Configure(operation->mutable_destination(), operation->mutable_io_engine(), root_ / "storage" / "output");
+  ASSERT_TRUE(broker().HandleRequest(request).has_staged_checkpoint_directory());
+
+  const auto later = std::chrono::steady_clock::now() + std::chrono::hours(2) + std::chrono::minutes(5);
+  broker().SetClock([later] { return later; });
+  request.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_EXPIRED);
+  request.mutable_abort();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_EXPIRED);
+  EXPECT_FALSE(fs::exists(root_ / "storage" / "output"));
+
+  broker().ReapExpiredTransactions(later);
+  request.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+}
