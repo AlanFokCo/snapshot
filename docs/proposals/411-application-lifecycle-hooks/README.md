@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# SNEP-411: Application profiles for checkpoint and restore
+# SNEP-411: Application contracts for checkpoint and restore
 
 Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
 
@@ -18,9 +18,9 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
     - [Backward compatibility and migration](#backward-compatibility-and-migration)
 - [Design Details](#design-details)
   - [API](#api)
-    - [Application contract](#application-contract)
+    - [Application contract binding](#application-contract-binding)
     - [SnapshotJob](#snapshotjob)
-    - [ApplicationProfile](#applicationprofile)
+    - [ClusterApplicationContract](#clusterapplicationcontract)
     - [Checkpoint metadata](#checkpoint-metadata)
   - [Capture and restore execution](#capture-and-restore-execution)
     - [Recovery guarantees](#recovery-guarantees)
@@ -30,35 +30,30 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
   - [Test Plan](#test-plan)
   - [Graduation Criteria](#graduation-criteria)
 - [Appendix](#appendix)
-  - [Detailed test coverage](#detailed-test-coverage)
   - [References](#references)
 <!-- /toc -->
 
 ## Summary
 
-Application profiles define how Snapshot checks capture readiness and notifies
-an application after restore. Administrators install profiles; users select them
+Application contracts define how Snapshot checks capture readiness and notifies
+an application after restore. Administrators install contracts; users select them
 in PodSnapshot or SnapshotJob.
 
 ## Motivation
 
-Snapshot and the application need to communicate in both directions. Before
-capture, the application tells Snapshot that it is safe to checkpoint. After
-restore, Snapshot tells the application that process and GPU restoration is
-complete and it may begin recovery. A restored process is not necessarily ready
-to serve: the application may need to rebuild connections or other resources
-before accepting requests.
+Before capture, the application must tell Snapshot it is safe to checkpoint.
+After restore, Snapshot must tell the application it may recover connections
+and other resources before serving requests.
 
-Today, this communication uses files on a shared control volume. This proposal
-adds HTTP and Unix-signal options while keeping application preparation and
-recovery logic in the application. Reusable profiles let users select an engine
-integration without repeating its endpoints, signals, and timing settings.
+Today, this exchange uses files on a shared control volume. HTTP and Unix
+signals let applications expose other interfaces. Contracts let users select
+an engine integration without repeating endpoints, signals, and timing settings.
 
 ### Goals
 
-- Configure both PodSnapshot and SnapshotJob through the same profile API.
-- Record per-container profile names for resolution at capture and restore.
-- Provide the existing file integration as an installed, configurable default profile.
+- Configure both PodSnapshot and SnapshotJob through the same contract API.
+- Record per-container contract names for resolution at capture and restore.
+- Provide the existing file integration as an installed, configurable default contract.
 
 ### Non-Goals
 
@@ -69,122 +64,92 @@ integration without repeating its endpoints, signals, and timing settings.
 
 ## Proposal
 
-Administrators install an `ApplicationProfile` with optional `quiesceProbe` and
-`restoreRelease` actions. Users select a profile by name for each captured
-container. Snapshot checks readiness before capture and sends any configured
-release notification after restoring process and GPU state.
-
-The application is responsible for capture safety, recovery, and serving
-readiness. Integration documentation lists supported engine versions and
-required application configuration.
+A `ClusterApplicationContract` defines two optional actions: `quiesceProbe` checks
+capture readiness; `restoreRelease` notifies the application after process and
+GPU restoration. The application owns capture safety, recovery, and serving
+readiness. Users select a contract by name for each captured container.
 
 ### Defaults and user probes
 
-Snapshot installs `snapshot-files`, an ApplicationProfile using the existing
-`ready-for-snapshot` and `restore-complete` files. Containers without an explicit
-binding use the administrator-configured default profile, initially
-`snapshot-files`. Explicit bindings take precedence. A missing profile, including
-the configured default, blocks the operation rather than silently falling back.
+Containers without a binding use the administrator-configured default contract,
+initially `snapshot-files`. A missing contract blocks the operation; it never
+causes fallback to another contract.
 
-An empty profile is valid. In any selected profile, an omitted `quiesceProbe`
-uses the source Pod's `Ready` condition; an omitted `restoreRelease` sends no
-application notification.
+An empty contract is valid. An omitted `quiesceProbe` waits for the whole Pod's
+`Ready` condition, including sidecars and readiness gates. An omitted
+`restoreRelease` sends no application notification.
 
-Preserve every user-defined readiness, startup, and liveness probe on source
-and destination containers. SnapshotJob no longer needs to inject file readiness:
-the installed profile checks the file directly. When restore startup gating is
-enabled, inject the `restore-complete` startup probe only if the destination
-container has no user-defined startup probe.
-
-On restored containers, custom startup probes must prevent premature startup
-success, liveness must tolerate recovery, and readiness must stay false until
-serving is available. Snapshot tracks restoration independently of these probes.
+Preserve all user-defined readiness, startup, and liveness probes on source and
+destination containers. SnapshotJob stops injecting file readiness probes.
+When restore startup gating is enabled, inject the `restore-complete` startup
+probe only if the destination container has none. Custom startup probes must prevent premature
+success, liveness must tolerate recovery, and readiness must wait for serving.
 
 ### Limitations, Risks, and Mitigations
 
-Capture remains limited to one container per PodSnapshot. Profiles configure
-interfaces an application already implements; they cannot make a serving
-endpoint usable while the application is waiting for release. An HTTP control
-endpoint must work after runtime restore, before release, including at a new
-Pod IP. Only unencrypted HTTP is supported; HTTPS is out of scope.
+Capture is limited to one container per PodSnapshot. An HTTP control endpoint
+must work before release, including after restore at a new Pod IP.
 
-Integration tests must validate capture and restore with the deployment's
-probes and networking. Snapshot trusts the application's capture signal.
-
-| Risk | Effect | Mitigation or owner responsibility |
-| --- | --- | --- |
-| Premature capture signal | The checkpoint contains unsafe application state. | The application maintains capture safety; integration tests verify recovery and inference. |
-| Recreated profile name | New restores use a potentially incompatible definition. | Administrators validate compatibility or publish a new name. |
-| Lost release response | Delivery repeats; deadline expiry may terminate an already released application. | Applications handle duplicates; Snapshot enforces the retry deadline. |
-| Custom probes during recovery | Kubernetes restarts a recovering container. | Workload owners configure probes to tolerate recovery. |
-| Shared HTTP endpoint | Requests for different destinations are indistinguishable. | The application coordinates releases, including destinations restored at different times. |
-| Unprotected HTTP listener | An unintended caller releases the application. | The deployment restricts endpoint access. |
+| Risk | Required handling |
+| --- | --- |
+| Unsafe capture signal | The application stays safe until capture; integration tests verify recovery and inference. |
+| Recreated contract name | Administrators validate compatibility or publish a new name. |
+| Lost release response | Applications handle duplicate delivery; deadline expiry can terminate an already released application. |
+| Custom probes during recovery | Workload owners configure probes to tolerate recovery. |
+| Shared HTTP endpoint | The application coordinates releases for destinations restored at different times. |
+| Unprotected HTTP listener | The deployment restricts endpoint access. |
 
 #### Backward compatibility and migration
 
-Existing target-container lists and checkpoint artifacts remain valid. Users do
-not need an explicit binding for the installed file integration. Artifacts
-without profile metadata retain the legacy release notification, independently
-of the configured default. The capture behavior changes as follows:
+Artifacts without contract metadata retain legacy release behavior regardless of
+the cluster default. Two capture changes may require workload updates:
 
-- User-defined probes are preserved instead of replaced or removed. Workloads
-  that relied on those overrides must adjust their probes for capture and restore.
-- The installed file profile checks `ready-for-snapshot` directly, independently
-  of Pod readiness. Workloads that previously used only Kubernetes readiness
-  must select a profile without `quiesceProbe`; that fallback waits for the
-  whole Pod's `Ready` condition, including sidecars and readiness gates.
+- User probes are preserved. Workloads that relied on Snapshot replacing or
+  removing them must adjust their probes.
+- The default file contract checks `ready-for-snapshot` directly, independently
+  of Pod readiness. Workloads that need Pod readiness instead must select a
+  contract without `quiesceProbe`.
 
-Upgrade all participating node agents before enabling profile selection in the
-operator or creating profiled work orders. Older agents ignore the new fields;
-mixed-version execution of profiled work is unsupported. Validate application
-profiles and probe configuration before migrating workloads. Before downgrading,
-remove profiled captures and restores from the affected agents' execution scope;
-existing profiled artifacts must remain assigned to compatible agents.
+Upgrade participating agents before enabling contracts: older agents ignore the
+new fields. Before downgrading, stop assigning captures and restores using contracts
+to those agents, including restores from existing artifacts with contract bindings.
 
 ## Design Details
 
 ### API
 
-All resources use `nvidia.com/v1alpha1`. The following Go definitions describe
-the proposed JSON structure; CRD validation and defaulting enforce the rules
-below.
+All resources use `nvidia.com/v1alpha1`. Existing structs below show only the
+added fields.
 
-#### Application contract
+#### Application contract binding
 
-PodSnapshot selects profiles through `spec.applicationContract.containers`, a
+PodSnapshot selects contracts through `spec.applicationContract.containers`, a
 list keyed by source container name:
 
 ```go
 type PodSnapshotSpec struct {
-	Source              PodSnapshotSource    `json:"source"`
-	ApplicationContract *ApplicationContract `json:"applicationContract,omitempty"`
+	ApplicationContract *ApplicationContractBinding `json:"applicationContract,omitempty"`
 }
 
-type ApplicationContract struct {
+type ApplicationContractBinding struct {
 	// +listType=map
 	// +listMapKey=name
-	Containers []ContainerApplicationContract `json:"containers"`
+	Containers []ContainerApplicationContractBinding `json:"containers"`
 }
 
-type ContainerApplicationContract struct {
-	Name       string                      `json:"name"`
-	ProfileRef ApplicationProfileReference `json:"profileRef"`
+type ContainerApplicationContractBinding struct {
+	Name        string                       `json:"name"`
+	ContractRef ApplicationContractReference `json:"contractRef"`
 }
 
-type ApplicationProfileReference struct {
+type ApplicationContractReference struct {
 	Name string `json:"name"`
 }
 ```
 
-Each entry's `name` must match a container selected by
-`spec.source.podRef.containers`. Each binding requires a nonempty
-`profileRef.name` that is a valid Kubernetes resource name for a cluster-scoped
-profile. A selected container without a binding uses the default behavior
-described in [Defaults and user probes](#defaults-and-user-probes); a missing
-explicitly named profile never falls back to it.
-
-Profile bindings are immutable with the PodSnapshot or SnapshotJob spec.
-The existing target-container lists remain unchanged.
+Each `name` must match a container in `spec.source.podRef.containers`.
+`contractRef.name` must be a nonempty Kubernetes resource name. Bindings are
+immutable with the PodSnapshot or SnapshotJob spec.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -199,33 +164,20 @@ spec:
   applicationContract:
     containers:
       - name: main
-        profileRef:
+        contractRef:
           name: cooperative-http-v1
 ```
 
 #### SnapshotJob
 
-`SnapshotJob.spec.podSnapshotTemplate.applicationContract` supplies the bindings
-for the generated PodSnapshot. The updated structures are:
+Add `applicationContract` to `SnapshotJob.spec.podSnapshotTemplate`. The controller
+copies it into the generated PodSnapshot. Each entry must name a target container.
 
 ```go
-type SnapshotJobSpec struct {
-	PodTemplate           corev1.PodTemplateSpec `json:"podTemplate"`
-	ActiveDeadlineSeconds *int64                 `json:"activeDeadlineSeconds,omitempty"`
-	PodSnapshotTemplate   PodSnapshotTemplate    `json:"podSnapshotTemplate"`
-}
-
 type PodSnapshotTemplate struct {
-	Metadata            *PodSnapshotTemplateMetadata `json:"metadata,omitempty"`
-	TargetContainers    []string                     `json:"targetContainers,omitempty"`
-	ApplicationContract *ApplicationContract         `json:"applicationContract,omitempty"`
+	ApplicationContract *ApplicationContractBinding `json:"applicationContract,omitempty"`
 }
 ```
-
-`applicationContract` is the new optional field; the other fields retain their
-existing semantics. Each entry's `name` must belong to `targetContainers`.
-
-For example, add this fragment alongside the existing `spec.podTemplate`:
 
 ```yaml
 spec:
@@ -234,27 +186,19 @@ spec:
     applicationContract:
       containers:
         - name: main
-          profileRef:
+          contractRef:
             name: cooperative-http-v1
 ```
 
-The controller copies these bindings into `PodSnapshot.spec.applicationContract`;
-unbound targets use the configured default profile.
+#### ClusterApplicationContract
 
-#### ApplicationProfile
-
-ApplicationProfile is cluster-scoped and its spec is immutable. Administrators
-can publish a new name or delete and recreate an existing one. References use
-only the name, not the profile UID.
+ClusterApplicationContract is cluster-scoped with an immutable spec. Administrators
+can publish a new name or delete and recreate an existing one. Name-only references
+always select a ClusterApplicationContract, including in saved checkpoints.
+References do not bind to UIDs; no `kind` field is introduced.
 
 ```go
-type ApplicationProfile struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              ApplicationProfileSpec `json:"spec"`
-}
-
-type ApplicationProfileSpec struct {
+type ClusterApplicationContractSpec struct {
 	QuiesceProbe   *QuiesceProbe   `json:"quiesceProbe,omitempty"`
 	RestoreRelease *RestoreRelease `json:"restoreRelease,omitempty"`
 }
@@ -302,18 +246,15 @@ type SignalAction struct {
 
 When present, `quiesceProbe` requires exactly one of `file` or `httpGet`, and
 `restoreRelease` requires exactly one of `file`, `httpPost`, or `signal`.
-Omitted actions follow the [proposal defaults](#defaults-and-user-probes).
 
 Defaults are `initialDelaySeconds: 0`, `periodSeconds: 1`,
 `timeoutSeconds: 1`, and `successThreshold: 1`. The initial delay is nonnegative;
-other timing values and the success threshold must be positive. A release
-defaults to a one-second period and one-second timeout. The timeout bounds one
-attempt; it is not the total operation deadline.
+other values must be positive. Period and timeout defaults apply to both actions.
+`timeoutSeconds` bounds one call, not the total operation.
 
-There is no `failureThreshold`. An unsuccessful observation resets the success
-count and keeps capture waiting without restarting the container. Restarting or
-replacing the source container invalidates accumulated successes. The initial
-delay starts from that container incarnation's start time.
+There is no `failureThreshold`: a failed check resets the success count and keeps
+waiting without restarting the container. Reset the count when the source container
+restarts or is replaced; measure initial delay from that container's start time.
 
 File names must be single path components within the container's
 `SNAPSHOT_CONTROL_DIR`. Absolute paths, separators, `.` and `..` are invalid.
@@ -342,11 +283,11 @@ HTTP release requests, including connection failures, are retried until the
 restore deadline. Signal handlers must be installed before capture. Shared HTTP
 endpoints receive no container identifier and must coordinate the required releases.
 
-For example, a cooperative application's profile can declare:
+Example HTTP contract (illustrative endpoints):
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
-kind: ApplicationProfile
+kind: ClusterApplicationContract
 metadata:
   name: cooperative-http-v1
 spec:
@@ -354,20 +295,15 @@ spec:
     httpGet:
       path: /snapshot/quiesced
       port: 9001
-    initialDelaySeconds: 0
-    periodSeconds: 1
     timeoutSeconds: 2
-    successThreshold: 1
   restoreRelease:
     httpPost:
       path: /snapshot/restored
       port: 9001
-    periodSeconds: 1
     timeoutSeconds: 2
 ```
 
-These paths illustrate the contract; they are not existing engine endpoints.
-A profile can also combine file readiness with signal release:
+File readiness can also be combined with signal release:
 
 ```yaml
 spec:
@@ -379,22 +315,16 @@ spec:
       signal: SIGUSR1
 ```
 
-For file release, use `restoreRelease.file.name: restore-complete`.
-
 #### Checkpoint metadata
 
-Add the same optional `applicationContract` field to `PodSnapshotContentSpec`
-and checkpoint metadata:
+Add optional `applicationContract` to `PodSnapshotContentSpec` and checkpoint metadata.
+Before capture, the operator fills missing bindings with the configured default
+and saves all selected names in the immutable content spec. The agent includes
+these bindings in the checkpoint; definitions and UIDs are not stored there.
+Changing the default affects only captures whose bindings are not yet saved.
 
-```go
-// Added to PodSnapshotContentSpec and checkpoint metadata:
-// ApplicationContract *ApplicationContract `json:"applicationContract,omitempty"`
-```
-
-The operator records explicit and defaulted bindings in the immutable content spec;
-the agent records them with the checkpoint. Metadata retains profile names,
-not definitions or profile UIDs. Restore maps each captured source container's
-binding to its destination containers. Destination Pods do not select profiles.
+Restore maps source bindings to destination containers. Destination Pods do not
+select contracts, and restore does not consult the cluster default.
 
 ### Capture and restore execution
 
@@ -402,7 +332,7 @@ binding to its destination containers. Destination Pods do not select profiles.
 
 ```mermaid
 flowchart TD
-    A[Resolve explicit or default profile] --> B{Profile has quiesceProbe?}
+    A[Resolve explicit or default contract] --> B{Contract has quiesceProbe?}
     B -->|Yes| C[Poll until successThreshold is reached]
     B -->|No| D[Wait for whole-Pod Ready]
     C --> E[Revalidate source identity]
@@ -410,10 +340,9 @@ flowchart TD
     E --> F[Capture process and GPU state]
 ```
 
-The agent saves the resolved profile for retries and restarts. A missing
-profile blocks capture, including when selected by default. The application must clear stale readiness
-markers before initialization and remain safe once its capture signal succeeds.
-Pod readiness includes other containers and readiness gates.
+The agent saves the resolved definition for capture retries and restarts. The
+application must clear stale readiness markers before initialization and remain
+safe once its capture signal succeeds.
 
 **Restore and release**
 
@@ -421,8 +350,8 @@ Pod readiness includes other containers and readiness gates.
 flowchart TD
     A[Restore request] --> B{Existing attempt?}
     B -->|Yes| C[Recover recorded progress using saved definitions]
-    B -->|No| D[Resolve recorded profile names to current definitions]
-    D --> E{Profiles available?}
+    B -->|No| D[Resolve recorded contract names to current definitions]
+    D --> E{Contracts available?}
     E -->|No| F[Wait and retry lookup]
     F --> D
     E -->|Yes| G[Restore container]
@@ -430,15 +359,14 @@ flowchart TD
     H --> I[Complete restore]
 ```
 
-New attempts use current profile definitions, never capture-time definitions.
-Profile changes do not affect active attempts. The application must make release
-idempotent: a lost response or agent restart can cause repeat delivery. Release
-success does not mean the application is ready to serve. The
-[recovery flow](#recovery-guarantees) handles interrupted attempts and retries.
+New restore attempts use current definitions; active attempts keep saved definitions
+across retries and restarts, even if the contract is deleted or recreated. Release
+must be idempotent because delivery may repeat. Success acknowledges the
+notification, not serving readiness; application recovery may continue asynchronously.
 
 **Deadlines.** SnapshotJob's `activeDeadlineSeconds` bounds its source lifecycle.
 A direct PodSnapshot waits for capture readiness, request deletion, or source
-termination. Probe timeouts bound individual observations.
+termination.
 
 The restore timeout covers runtime restoration and release. Its absolute deadline
 survives retries and restarts. If release completion is not recorded in time,
@@ -465,51 +393,38 @@ flowchart TD
     C --> H[Finish even after deadline expiry]
 ```
 
-Recovery never repeats CRIU restore in the same container. Once release
-completion is recorded, marker or status failures require repair, not cleanup.
+Recovery never repeats CRIU restore in the same container. An omitted release
+also records completion and publishes the startup marker.
 
-Profile-based restores use agent-owned recovery records, not workload-written
-markers. Unprofiled restores without a record keep the legacy marker recovery
-path.
+Restores with contract bindings use agent-owned recovery records, not workload-written
+markers. Legacy restores without a record keep marker-based recovery.
 
 ### Security
 
-Profile management is governed by Kubernetes RBAC. Selecting a profile lets a
-snapshot requester cause the agent to invoke application behavior through HTTP,
-files, or signals. These actions are bounded, but can still affect the workload.
+Kubernetes RBAC governs contract management. A binding on PodSnapshot can trigger
+application actions without changing the Pod, so it does not establish the Pod
+owner's consent. Authorization must cover both the request and the target Pod.
 
-The binding lives on PodSnapshot, separate from the Pod definition, so selecting
-a profile does not establish the workload owner's consent to those actions.
-Authorization must cover the target Pod as well as the snapshot request. The
-contract limits actions to the selected workload and the transports below;
-arbitrary commands and caller-supplied destinations are not supported.
+HTTP requests go directly to the Pod IP without redirects or environment proxies.
+Reject host-network Pods for HTTP actions. Containers share the Pod network, so
+HTTP permissions must account for the whole Pod. Deployments must restrict
+access to the unencrypted control listener.
 
-HTTP requests go directly to the selected Pod IP, without redirects or
-environment-configured proxies. Host-network Pods are rejected for HTTP
-interactions. Pod networking does not isolate containers, so HTTP actions must
-be assessed against the whole Pod trust boundary. The deployment must restrict
-the unencrypted control listener to intended callers.
+Confine file operations to the container's control directory; reject symlinks
+and path traversal. Signals target the verified restored process; callers cannot supply
+a host PID. Protect bindings and attempt records as agent-owned metadata.
+Logs and Events must not include response bodies or application memory.
 
-File access is confined to the selected container's control directory using
-operations that reject symlinks and traversal. Signal recipients are resolved
-from the restored process identity; users cannot supply a host PID. Profile
-bindings and attempt records must retain the integrity protections of other
-agent-owned metadata.
-
-Logs and Events record action type and outcome, not HTTP response bodies or
-application memory.
-
-**Open question:** should HTTP actions support authentication initially, and how
-should credentials be configured for capture and restore? The proposed API has
-no credential fields; initial support remains undecided.
+**Open question:** should HTTP authentication be supported initially, and how
+should capture and restore obtain credentials? The API has no credential fields.
 
 ### Configuration
 
-Snapshot installs this ApplicationProfile with the release:
+Snapshot installs this ClusterApplicationContract with the release:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
-kind: ApplicationProfile
+kind: ClusterApplicationContract
 metadata:
   name: snapshot-files
 spec:
@@ -521,71 +436,46 @@ spec:
       name: restore-complete
 ```
 
-The proposed Helm setting selects the default for both PodSnapshot and
-SnapshotJob across the cluster. Snapshot ships with:
+This Helm setting selects the cluster default for PodSnapshot and SnapshotJob:
 
 ```yaml
 operator:
-  defaultApplicationProfile: snapshot-files
+  defaultApplicationContract: snapshot-files
 ```
 
-To change it, install an ApplicationProfile and set its name in the release's
-values file, then apply the change with `helm upgrade`:
-
-```yaml
-operator:
-  defaultApplicationProfile: my-application-profile
-```
-
-The operator resolves omitted bindings before issuing capture work and persists
-those effective bindings with the content. Changing the default affects only
-captures whose bindings have not yet been resolved. Retries retain the selected
-name, and restores use checkpoint metadata rather than the cluster default.
-
-The setting must name an ApplicationProfile; an empty value is invalid. If the
-named resource is unavailable, captures that depend on it wait for resolution.
-An explicit per-container `profileRef` takes precedence over this setting.
-
-For example, this PodSnapshot uses the configured default for `main`:
-
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: PodSnapshot
-metadata:
-  name: model-snapshot
-spec:
-  source:
-    podRef:
-      name: model-source
-      containers: [main]
-```
-
-With the shipped configuration, capture waits for
-`$SNAPSHOT_CONTROL_DIR/ready-for-snapshot`; restore publishes
-`$SNAPSHOT_CONTROL_DIR/restore-complete`. A SnapshotJob likewise uses the default
-when its `podSnapshotTemplate.applicationContract` omits the target's binding.
+To change it, install another ClusterApplicationContract, set its name here, and apply
+with `helm upgrade`. Empty values are invalid. Omit a container's binding to use
+this default; an explicit `contractRef` takes precedence.
 
 ### Monitoring
 
-Expose waiting for quiescence and release failures through existing snapshot
-and restore status reporting. Add Events for profile resolution failure,
-invalid lifecycle configuration, and release failure. SnapshotJob deadline
-failures retain their existing reporting.
-Routine unsuccessful probe polls remain debug logs rather than Events.
+Report waiting for quiescence and release failures in snapshot and restore
+status. Add Events for missing contracts, invalid configuration, and release failures.
+Log routine unsuccessful probe polls only at debug level.
 
 ### Test Plan
 
-Validation must establish that:
-
-- API defaults, bindings, and probe preservation match the contract.
-- Profile replacement affects new attempts without changing active ones.
-- Crashes and retries preserve deadlines and never repeat runtime restoration.
-- Transport isolation and legacy compatibility hold.
-- Real application integrations complete capture, restore, and inference.
-
-The [detailed test coverage](#detailed-test-coverage) lists failure cases and
-transport-specific checks. A transport combination is advertised only after a
-real application integration validates it.
+- **API:** validate optional actions, empty contracts, exclusive handlers, timing
+  defaults, immutable specs, unique container names, and target membership.
+  Check binding propagation from SnapshotJob through checkpoint metadata.
+- **Capture:** test success thresholds, source restarts, cancellation, deadlines,
+  and Pod readiness fallback. Verify user probe preservation, direct default-file
+  checks, and startup gating only when enabled and no user startup probe exists.
+- **Contracts:** test installation, default changes, explicit precedence, and
+  persisted bindings. Missing contracts block new attempts; recreation unblocks
+  them. Active attempts keep their definitions across deletion and agent restart.
+  Old artifacts retain legacy release behavior regardless of the default.
+- **Recovery:** inject failures around runtime restore, release, persistence,
+  and startup-marker publication. Verify the original deadline, release retries,
+  repair after recorded success, and no repeated CRIU restore. Cover concurrent
+  agents, omitted release, and legacy marker recovery.
+- **Transports:** test status codes, ignored bodies, retries, redirect/proxy and
+  host-network rejection, file confinement, stale markers, and signal targets.
+  Verify file/signal destination isolation and shared-HTTP coordination.
+- **Integrations:** validate file, HTTP, and file-readiness/signal-release with
+  inference after restore. Cover new Pod IPs, release before serving, asynchronous
+  recovery, and custom probes. Advertise only validated combinations and document
+  supported engine versions, topologies, and required application settings.
 
 ### Graduation Criteria
 
@@ -597,40 +487,6 @@ contract, compatibility coverage for previously produced artifacts, and
 documented failure and recovery procedures.
 
 ## Appendix
-
-### Detailed test coverage
-
-- **API and propagation:** optional actions and empty profiles, handler
-  exclusivity, defaults, immutable specs, unique list keys, target-container
-  validation, and
-  bindings copied from SnapshotJob through content and checkpoint metadata.
-  Preserve the existing target-name lists and single-container capture limit.
-- **Capture and probes:** explicit quiesce probes versus Pod readiness fallback,
-  success thresholds, source incarnation changes, cancellation, and deadlines.
-  Preserve every user-defined probe on source and destination containers;
-  verify the default file profile checks readiness without injecting a Pod
-  readiness probe. Inject restore startup gating only when enabled and no user
-  startup probe exists.
-- **Profile resolution:** verify installation of the file profile, administrator
-  default selection, explicit binding precedence, and persisted default bindings.
-  Default changes must not affect bound captures or existing artifacts; artifacts
-  without bindings retain legacy release behavior. Missing names block new attempts and become usable
-  after recreation. New attempts use replacement definitions; existing attempts
-  retain saved definitions across profile deletion and agent restart.
-- **Restore recovery:** inject failures around runtime completion, release,
-  record persistence, and startup-marker publication. Never replay an uncertain
-  or completed runtime restore. Retry release idempotently within the original
-  deadline; repair recorded completion without destructive cleanup. Cover
-  overlapping agents, omitted release, and legacy marker recovery.
-- **Transports:** HTTP success codes, ignored response bodies, retries, redirects,
-  proxies, host-network rejection, file confinement, stale markers, and signal
-  delivery to the restored root. Verify destination isolation for file/signal
-  and application-owned coordination for shared HTTP endpoints.
-- **Application integrations:** retain existing file integrations and validate
-  HTTP and file-readiness/signal-release with actual inference after restore.
-  Cover a changed Pod IP, release before serving starts, asynchronous recovery,
-  and compatible custom probes. Advertise a transport combination only after a
-  real application integration validates it.
 
 ### References
 
