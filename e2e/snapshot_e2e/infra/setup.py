@@ -881,9 +881,9 @@ def ensure_checkpoint_pvc(
         mismatches = []
         if requested != size:
             mismatches.append(f"requested storage={requested}, configured size={size}")
-        if access_mode not in access_modes:
+        if access_modes != [access_mode]:
             mismatches.append(
-                f"accessModes={access_modes}, expected to contain {access_mode}"
+                f"accessModes={access_modes}, expected [{access_mode}]"
             )
         if storage_class and actual_storage_class != storage_class:
             mismatches.append(

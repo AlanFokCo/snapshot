@@ -111,10 +111,14 @@ def test_installer_requests_configured_checkpoint_mode(monkeypatch, cpu_only, mo
 
 
 @pytest.mark.parametrize(
-    "expected,existing",
-    [("ReadWriteOnce", "ReadWriteMany"), ("ReadWriteMany", "ReadWriteOnce")],
+    "expected,existing_modes",
+    [
+        ("ReadWriteOnce", ["ReadWriteMany"]),
+        ("ReadWriteMany", ["ReadWriteOnce"]),
+        ("ReadWriteOnce", ["ReadWriteOnce", "ReadWriteMany"]),
+    ],
 )
-def test_existing_pvc_with_wrong_mode_is_rejected(monkeypatch, expected, existing):
+def test_existing_pvc_with_wrong_mode_is_rejected(monkeypatch, expected, existing_modes):
     from kubernetes import client
     from kubernetes.client import ApiException
 
@@ -124,7 +128,7 @@ def test_existing_pvc_with_wrong_mode_is_rejected(monkeypatch, expected, existin
     monkeypatch.setattr(client.CoreV1Api, "create_namespaced_persistent_volume_claim", conflict)
     pvc = client.V1PersistentVolumeClaim(
         spec=client.V1PersistentVolumeClaimSpec(
-            access_modes=[existing],
+            access_modes=existing_modes,
             resources=client.V1VolumeResourceRequirements(requests={"storage": "2Gi"}),
         ),
         status=client.V1PersistentVolumeClaimStatus(phase="Bound"),
