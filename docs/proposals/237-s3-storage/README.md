@@ -135,9 +135,13 @@ sequenceDiagram
     PB->>S3: PUT index.json last under containers/name/
     PB-->>Agent: PublishedArtifact (store, handle)
     Agent->>API: Add descriptor to status.storage.artifacts, Ready when all containers confirmed
-    alt Commit reply lost or PageBroker restarted
+    alt Commit reply lost, agent still running
         Agent->>PB: Commit (same transaction)
         PB-->>Agent: Same PublishedArtifact, publication path is idempotent
+    end
+    alt Agent or PageBroker restarted before status was written
+        Agent->>PB: GetArtifactMetadata(storeID, artifactUID, container)
+        PB-->>Agent: Resolved PublishedArtifact and manifest, or ARTIFACT_NOT_FOUND
     end
     alt Transaction expired before index PUT
         PB-->>Agent: TRANSACTION_EXPIRED, unconfirmed objects left for sweep
@@ -216,11 +220,15 @@ under the store prefix instead of directories. Deletion timestamp handling,
 ownership recheck, finalizer and requeue are unchanged; see
 [Maintenance](#maintenance).
 
-**Agent loss after publication:** if the agent dies after PageBroker published but
-before status was written, the restarted agent asks PageBroker whether the index
-exists at the fixed key for that content and container. If it exists and names this
-store, content and container, the agent writes the descriptor and marks the content
-Ready. If not, the capture failed and a new capture gets a new content.
+**Agent loss after publication:** if the agent or PageBroker restarts after
+PageBroker published but before status was written, the retained transaction is
+gone, so the restarted agent cannot retry `Commit`. It calls `GetArtifactMetadata`
+with the store ID, content UID and container name instead. PageBroker resolves the
+single publication for that identity and returns its descriptor with the manifest;
+the agent checks that the manifest names this store, content and container,
+persists the descriptor and marks the content Ready. `ARTIFACT_NOT_FOUND` means the
+capture failed and a new capture gets a new content. The agent never derives a
+handle itself.
 
 ### Limitations, Risks, and Mitigations
 
@@ -228,7 +236,7 @@ Ready. If not, the capture failed and a new capture gets a new content.
 | --- | --- | --- |
 | Changed store | The installation is switched to another store, or back again. Content bound to the old store cannot be reached through the new one. If the old store is gone, its content can never be cleaned up. | The content keeps `storeID` and `artifactHandle`; the bucket layout is keyed by content UID. Switching S3 → PVC → the same S3 configuration hashes to the same `storeID`, so old checkpoints restore again with no migration. Every operation refuses a mismatched binding before any I/O. While the original store is inactive, deletion cannot be confirmed: the content gets a `StoreInactive` condition and an event and keeps its finalizer; the sweep retries. An administrator can set the annotation `snapshot.nvidia.com/release-artifacts=true` to drop the finalizer; the artifacts left behind are recorded in an event. |
 | Credentials or S3 outage | The key is revoked or the store is unreachable during a checkpoint, a restore or a cleanup. | Check destination access before capture and source access before restore. Bound retries and timeouts. Preflight cannot guarantee later access, so every operation handles denial mid-way. Access denial never proves that an artifact is missing, so it never triggers deletion. |
-| Uncertain publication | PageBroker uploaded the checkpoint but the `Commit` reply to the agent was lost, or one side restarted. Nobody knows whether the publication exists. | The publication has one fixed path per content and container. A retried `Commit` checks that path and is a no-op if a matching index is already there. Uploads resume only from complete staging; CUDA/CRIU are never replayed. If the agent itself is lost before status is written, it probes the same fixed path through PageBroker on restart and finishes or fails the capture from what it finds. |
+| Uncertain publication | PageBroker uploaded the checkpoint but the `Commit` reply to the agent was lost, or one side restarted. Nobody knows whether the publication exists. | The publication has one fixed path per content and container. A retried `Commit` checks that path and is a no-op if a matching index is already there. Uploads resume only from complete staging; CUDA/CRIU are never replayed. If the agent itself is lost before status is written, it looks the publication up by identity through `GetArtifactMetadata` on restart and finishes or fails the capture from what it finds. |
 | Cleanup races | On S3, deleting an artifact while a restore is still downloading it fails the restore, and an upload that lands after cleanup leaves an orphan. On PVC neither happens: an unlinked file stays readable to a process that has it open. | Deletion is immediate on both backends, as today. A restore interrupted by deletion fails and reports it; the content was deleted under it. A publication that lands after cleanup is an orphan the next sweep removes. Stage 2 adds explicit active-operation tracking so cleanup can wait for in-flight operations. |
 | Metadata loss | The `PodSnapshotContent` objects are lost, for example a cluster rebuilt from scratch. The artifacts are still in the bucket but nothing owns them, and the next sweep would delete them as orphans. | Back up the content objects separately. While they are being restored from backup, pause sweeps and new operations until an administrator resumes. |
 | Operator process risk | Maintenance already runs inside the operator process for PVC, so a panic or leak there affects reconciliation, and a leadership change drops in-flight work. S3 widens this: the process now holds store credentials and performs network transfers, not only local deletes. | Existing mitigations stay: panics isolated per task, bounded worker pool and transfer concurrency, pending work rebuilt from cluster state after any restart or leadership change. Credentials are scoped to maintenance operations only. |
@@ -389,9 +397,11 @@ What changes for S3, and why:
   access, so it obtains the manifest through `GetArtifactMetadata` on the shared
   volume and then runs the existing compatibility checks unchanged. Storage checks
   stay mandatory even when compatibility is bypassed.
-- **Publication descriptors in status.** The handle returned by `Commit` is the
-  only way to find the publication later, so the agent persists it per container
-  and sets Ready only when every required container is confirmed.
+- **Publication descriptors in status.** The descriptor returned by `Commit` is
+  how every later operation finds the publication, so the agent persists it per
+  container and sets Ready only when every required container is confirmed. The
+  identity lookup in `GetArtifactMetadata` exists only to recover that descriptor
+  after a lost reply or a restart; restores always use the persisted descriptor.
 - **Staged restore only.** Direct restore mounts a local checkpoint directory,
   which S3 does not have. The agent derives the mode from the bound store's
   backend: PVC keeps the configured mode, S3 always stages.
@@ -405,8 +415,9 @@ process orchestration.
 #### PageBroker: internal API
 
 Extend [pagebroker.proto](../../../agent/pagebroker/v1/pagebroker.proto), using the
-existing local Unix socket. These are proposed additions; wire numbers must be
-reconciled with the separate CUDA integration. Only new fields are shown.
+existing local Unix socket. Storage extensions use field numbers and failure codes
+from 20 upward in `Request.command`, `Response.result` and `Failure.Code`; 12-19
+stay reserved for the separate CUDA integration. Only new fields are shown.
 
 ```protobuf
 // Identity before an artifact has been published.
@@ -439,18 +450,26 @@ message CommitComplete {
   PublishedArtifact published_artifact = 1; // Checkpoint result; absent for restore Commit.
 }
 
+// Exactly one of artifact or target is required.
 message GetArtifactMetadataRequest {
   PublishedArtifact artifact = 1; // Exact committed publication whose metadata is needed.
+  ArtifactTarget target = 2;      // Identity lookup when no descriptor was received.
 }
 
 // Success result; errors use the existing Failure message.
 message GetArtifactMetadataComplete {
-  string manifest_directory = 1; // Shared local directory with verified manifest.yaml.
+  string manifest_directory = 1;  // Shared local directory with verified manifest.yaml.
+  PublishedArtifact artifact = 2; // Publication read; the resolved one for a target.
 }
 ```
 
-PageBroker resolves the backend from configuration. Reject conflicting artifact
-and legacy filesystem selectors; retain existing wire numbers and legacy PVC reads.
+PageBroker resolves the backend from configuration. Every artifact request rejects
+a mixed or missing selector with `INVALID_REQUEST` before any I/O: artifact and
+legacy filesystem selectors never combine, and the metadata request carries exactly
+one of `artifact` or `target`. Existing wire numbers and legacy PVC reads are
+retained. The I/O engine is optional on artifact requests: absent selects the
+configured engine, an explicit engine must support the bound store, and it never
+selects a store.
 
 **One new operation**, `GetArtifactMetadata`, extends `Request.command` /
 `Response.result`. Its logical signature is:
@@ -459,16 +478,20 @@ and legacy filesystem selectors; retain existing wire numbers and legacy PVC rea
 GetArtifactMetadata(
   request_id: string,       // Existing envelope: correlate the reply.
   transaction_id: string,   // Existing envelope: own the temporary metadata directory.
-  artifact: PublishedArtifact
+  artifact: PublishedArtifact | target: ArtifactTarget   // Exactly one.
 ) -> GetArtifactMetadataComplete | Failure
 ```
 
 PageBroker verifies the store binding, committed publication, supported format,
 metadata access and integrity, then returns a temporary local directory containing
-`manifest.yaml` for the exact requested publication. A mismatch returns `Failure`;
-PageBroker never substitutes another publication. Snapshot decides how to use this
-metadata; restore compatibility checks are one caller flow. Full payload verification
-belongs to `StagedRestore`.
+`manifest.yaml` for the exact requested publication, together with that
+publication's descriptor. With a target, PageBroker resolves the single publication
+for that store, artifact UID and container and returns its descriptor, or fails with
+`ARTIFACT_NOT_FOUND`; the lookup reads only and never creates, completes or
+substitutes a publication. A mismatch returns `Failure`; PageBroker never
+substitutes another publication. Snapshot decides how to use this metadata; restore
+compatibility checks and recovery after a lost `Commit` reply are the two caller
+flows. Full payload verification belongs to `StagedRestore`.
 
 The directory remains valid until the transaction is closed with `Abort` or expires.
 The caller releases it after reading, on every exit path. Cleanup removes temporary
@@ -489,7 +512,10 @@ terminal, so during a rolling upgrade an old agent meeting the new code and a ne
 agent meeting the old code both stop the same way; no version gate is needed. An
 access error never proves absence.
 Use existing conditions with storage-specific reasons. Keep errors bounded and
-credential-free.
+credential-free: a storage-code `Failure.message` is at most 1024 UTF-8 bytes and
+never carries credentials or provider response bodies; the agent replaces a longer
+or invalid message with a fixed note and keeps the code. Legacy codes keep their
+existing diagnostics.
 
 Reuse request/transaction IDs and the 64 KiB message limit. A transaction's maximum
 lifetime starts at successful Prepare and retries never extend it. PageBroker checks
@@ -710,9 +736,11 @@ and preserve historical success.
 - S3-compatible service plus C++ PageBroker and Go maintenance SDKs/adapters.
 - Shared store-ID, artifact-format and publication/read/delete contracts.
 
-Before coding, finalize the credentials-file format and SDKs, canonical store-ID
-encoding, protobuf tags and numeric resource/time limits. Finalize the active-operation and generation-fencing
-protocol before enabling Stage 2 concurrent deletion.
+Protobuf tags are settled in
+[pagebroker.proto](../../../agent/pagebroker/v1/pagebroker.proto). Before coding the
+backends, finalize the credentials-file format and SDKs, canonical store-ID encoding
+and numeric resource/time limits. Finalize the active-operation and
+generation-fencing protocol before enabling Stage 2 concurrent deletion.
 
 ### Test Plan
 
@@ -744,7 +772,8 @@ backend integration with a disposable S3-compatible service, and GPU end-to-end 
   pagination, Abort and inspection expiry.
 - **Failure:** invalid credentials before capture, outage during transfer, lost
   replies/restarts, idempotent `Commit` retry, conflicting index fails closed, agent
-  loss after publication leaves the content not Ready, and no CUDA/CRIU replay.
+  loss after publication recovers the descriptor through the identity lookup or
+  leaves the content not Ready on `ARTIFACT_NOT_FOUND`, and no CUDA/CRIU replay.
 - **Lifecycle/concurrency:** inspection cleanup on success/refusal/requeue/cancellation;
   deletion checks served from the informer cache; immediate deletion on both backends,
   including S3 deletion under a running download; expiration during upload/download; an index `PUT`
