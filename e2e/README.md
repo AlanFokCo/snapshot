@@ -376,30 +376,21 @@ rewrite, to the restore-pod contract without a cluster.
 
 ### CuInterpose qualification
 
-The additional CPU checks, frontend tests, and GPU suite are introduced in
-[PR #338](https://github.com/ai-dynamo/snapshot/pull/338). Running those checks
-requires a checkout that includes that PR. The base cuInterpose build and Rust
-unit-test targets are already available on `main`.
+The coordinator and real-driver GPU suites are introduced in
+[PR #338](https://github.com/ai-dynamo/snapshot/pull/338), whose
+`agent/cmd/cuinterpose/tests/README.md` describes how to run them. The base
+cuInterpose build and Rust unit-test targets are already available on `main`.
 
 The multi-GPU recipes enable CUDA shared-memory support. See the
 [recipe guide](../docs/guides/cuda-shared-memory.md) for delivery and the
 [developer overview](../docs/development/cuinterpose.md) for the supported
 resource and synchronization contracts.
 
-Build and run the CPU suite before GPU qualification:
+Build the artifacts, then run the CPU and real-driver GPU suites:
 
 ```bash
-make -C agent/cmd/cuinterpose build test
-uv run --project agent/cmd/cuinterpose/tests/gpu pytest agent/cmd/cuinterpose/tests/gpu -vv -rs
+make -C agent/cmd/cuinterpose build test test-gpu
 ```
-
-The GPU suite uses the matching artifacts in `agent/cmd/cuinterpose/build/`
-(override with `CUINTERPOSE_BUILD_DIR`) and preloads them from its test-local
-directory. Shared-memory lifecycle tests need two GPUs and exercise read-only
-inspection, preparation, native CUDA checkpoint/restore, and reconstruction.
-Multicast additionally requires supported NVLink/NVSwitch hardware. HOST_NUMA
-tests require POSIX-shareable HOST_NUMA VMM and exercise coordinator
-reconstruction without native CUDA checkpoint or CRIU.
 
 These native tests do not qualify the Kubernetes/CRIU lifecycle. Run an opted-in
 multi-process workload through capture and restore, repeat with a distinct
