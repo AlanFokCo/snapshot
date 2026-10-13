@@ -4,8 +4,9 @@
 package compat
 
 import (
-	"sort"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // instructionSetFeatures are the CPU flags, as /proc/cpuinfo spells them, that
@@ -15,7 +16,7 @@ import (
 // its entries are left out because they name no instruction a process can run:
 // rep_good is a kernel performance hint, tme is memory encryption, and monitor
 // is MONITOR/MWAIT, which only ring 0 may execute.
-var instructionSetFeatures = featureSet(`
+var instructionSetFeatures = sets.New(strings.Fields(`
 	fpu tsc cx8 sep cmov clflush mmx fxsr sse sse2
 	syscall mmxext rdtscp 3dnowext 3dnow nopl
 	pni pclmulqdq ssse3 fma cx16 sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand
@@ -27,15 +28,7 @@ var instructionSetFeatures = featureSet(`
 	clzero avx512_4vnniw avx512_4fmaps
 	avx_vnni avx_ifma avx512_bf16 avx512_fp16 avx512_vp2intersect
 	amx_bf16 amx_tile amx_int8 amx_fp16 movdiri movdir64b serialize
-`)
-
-func featureSet(names string) map[string]bool {
-	set := make(map[string]bool)
-	for _, name := range strings.Fields(names) {
-		set[name] = true
-	}
-	return set
-}
+`)...)
 
 // InstructionSetFeatures keeps the instruction-set flags out of a CPU's flags,
 // sorted and without duplicates. The rest describe the machine rather than what
@@ -44,14 +37,9 @@ func featureSet(names string) map[string]bool {
 // refuse restores that work. A CPU with none of them is unknown, so the result
 // is then nil.
 func InstructionSetFeatures(flags []string) []string {
-	seen := make(map[string]bool, len(flags))
-	var features []string
-	for _, flag := range flags {
-		if instructionSetFeatures[flag] && !seen[flag] {
-			seen[flag] = true
-			features = append(features, flag)
-		}
+	features := instructionSetFeatures.Intersection(sets.New(flags...))
+	if features.Len() == 0 {
+		return nil
 	}
-	sort.Strings(features)
-	return features
+	return sets.List(features)
 }
