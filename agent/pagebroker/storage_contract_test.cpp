@@ -51,7 +51,7 @@ TEST(StorageContract, SharedWireFixtures)
   ASSERT_TRUE(status.ok()) << status.ToString();
   ASSERT_TRUE(fixtures.fields().contains("cases"));
   const auto& cases = fixtures.fields().at("cases").list_value().values();
-  ASSERT_EQ(cases.size(), 21);
+  ASSERT_EQ(cases.size(), 22);
 
   for (const auto& fixture : cases) {
     const auto& fields = fixture.struct_value().fields();

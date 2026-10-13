@@ -84,6 +84,15 @@ ValidateStagedRestore(const StagedRestoreRequest& request)
   return request.source();
 }
 
+void
+ValidateArtifactMetadata(const GetArtifactMetadataRequest& request)
+{
+  if (request.has_artifact() && request.has_target())
+    throw std::invalid_argument("artifact cannot be combined with target");
+  if (!request.has_artifact() && !request.has_target())
+    throw std::invalid_argument("metadata subject is required");
+}
+
 const StorageBackend&
 ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
 {
@@ -491,6 +500,7 @@ Broker::HandleRequest(const Request& request)
         response = Abort(request);
         break;
       case Request::kGetArtifactMetadata:
+        ValidateArtifactMetadata(request.get_artifact_metadata());
         response = Fail(request, Failure::INVALID_REQUEST, "artifact metadata retrieval is not implemented");
         break;
       default:

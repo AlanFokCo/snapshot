@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 )
 
 const metadataRequestTimeout = 2 * time.Minute
@@ -14,8 +16,8 @@ const metadataRequestTimeout = 2 * time.Minute
 // PrepareArtifactCheckpoint validates a bound destination before capture. A nil
 // engine selects the broker's configured default; it never changes the store.
 func (c Client) PrepareArtifactCheckpoint(ctx context.Context, transactionID string, target *ArtifactTarget, engine *IOEngine) (string, error) {
-	if target.GetStoreId() == "" || target.GetArtifact().GetArtifactUid() == "" || target.GetArtifact().GetContainerName() == "" {
-		return "", fmt.Errorf("PageBroker artifact target requires store ID, artifact UID and container name")
+	if err := validateArtifactTarget(target); err != nil {
+		return "", err
 	}
 	response, err := c.request(ctx, transactionID, &Request_PrepareStagedCheckpoint{
 		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Target: target, IoEngine: engine},
@@ -64,19 +66,56 @@ func (c Client) GetArtifactMetadata(ctx context.Context, transactionID string, a
 	if err := validatePublishedArtifact(artifact); err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(ctx, metadataRequestTimeout)
-	defer cancel()
-	response, err := c.request(ctx, transactionID, &Request_GetArtifactMetadata{
-		GetArtifactMetadata: &GetArtifactMetadataRequest{Artifact: artifact},
-	})
+	result, err := c.artifactMetadata(ctx, transactionID, &GetArtifactMetadataRequest{Artifact: artifact})
 	if err != nil {
 		return "", err
 	}
-	directory := response.GetGetArtifactMetadataComplete().GetManifestDirectory()
-	if directory == "" {
-		return "", fmt.Errorf("unexpected PageBroker metadata response")
+	if !proto.Equal(result.GetArtifact(), artifact) {
+		return "", fmt.Errorf("PageBroker metadata names another publication")
 	}
-	return directory, nil
+	return result.GetManifestDirectory(), nil
+}
+
+// LookupArtifactMetadata resolves the publication for a target whose descriptor
+// was never received, such as after a lost Commit reply, and stages its manifest
+// like GetArtifactMetadata. A missing publication is a FailureError with code
+// ARTIFACT_NOT_FOUND. It reads only and never completes a publication.
+func (c Client) LookupArtifactMetadata(ctx context.Context, transactionID string, target *ArtifactTarget) (*PublishedArtifact, string, error) {
+	if err := validateArtifactTarget(target); err != nil {
+		return nil, "", err
+	}
+	result, err := c.artifactMetadata(ctx, transactionID, &GetArtifactMetadataRequest{Target: target})
+	if err != nil {
+		return nil, "", err
+	}
+	if result.GetArtifact().GetStoreId() != target.GetStoreId() {
+		return nil, "", fmt.Errorf("PageBroker metadata names another store")
+	}
+	return result.GetArtifact(), result.GetManifestDirectory(), nil
+}
+
+func (c Client) artifactMetadata(ctx context.Context, transactionID string, request *GetArtifactMetadataRequest) (*GetArtifactMetadataComplete, error) {
+	ctx, cancel := context.WithTimeout(ctx, metadataRequestTimeout)
+	defer cancel()
+	response, err := c.request(ctx, transactionID, &Request_GetArtifactMetadata{GetArtifactMetadata: request})
+	if err != nil {
+		return nil, err
+	}
+	result := response.GetGetArtifactMetadataComplete()
+	if result.GetManifestDirectory() == "" {
+		return nil, fmt.Errorf("unexpected PageBroker metadata response")
+	}
+	if err := validatePublishedArtifact(result.GetArtifact()); err != nil {
+		return nil, fmt.Errorf("invalid PageBroker metadata response: %w", err)
+	}
+	return result, nil
+}
+
+func validateArtifactTarget(target *ArtifactTarget) error {
+	if target.GetStoreId() == "" || target.GetArtifact().GetArtifactUid() == "" || target.GetArtifact().GetContainerName() == "" {
+		return fmt.Errorf("PageBroker artifact target requires store ID, artifact UID and container name")
+	}
+	return nil
 }
 
 func validatePublishedArtifact(artifact *PublishedArtifact) error {
