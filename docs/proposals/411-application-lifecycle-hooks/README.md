@@ -23,12 +23,12 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
     - [ClusterApplicationContract](#clusterapplicationcontract)
     - [Checkpoint metadata](#checkpoint-metadata)
   - [Capture and restore execution](#capture-and-restore-execution)
-    - [Recovery guarantees](#recovery-guarantees)
   - [Security](#security)
+    - [RBAC](#rbac)
+    - [Transport isolation](#transport-isolation)
   - [Configuration](#configuration)
   - [Monitoring](#monitoring)
   - [Test Plan](#test-plan)
-  - [Graduation Criteria](#graduation-criteria)
 - [Appendix](#appendix)
   - [References](#references)
 <!-- /toc -->
@@ -79,11 +79,9 @@ An empty contract is valid. An omitted `quiesceProbe` waits for the whole Pod's
 `Ready` condition, including sidecars and readiness gates. An omitted
 `restoreRelease` sends no application notification.
 
-Preserve all user-defined readiness, startup, and liveness probes on source and
-destination containers. SnapshotJob stops injecting file readiness probes.
-When restore startup gating is enabled, inject the `restore-complete` startup
-probe only if the destination container has none. Custom startup probes must prevent premature
-success, liveness must tolerate recovery, and readiness must wait for serving.
+Preserve user-defined readiness, startup, and liveness probes on source and
+destination containers. When a probe is not configured, retain Snapshot's
+existing default probe logic.
 
 ### Limitations, Risks, and Mitigations
 
@@ -96,7 +94,7 @@ must work before release, including after restore at a new Pod IP.
 | Recreated contract name | Administrators validate compatibility or publish a new name. |
 | Lost release response | Applications handle duplicate delivery; deadline expiry can terminate an already released application. |
 | Custom probes during recovery | Workload owners configure probes to tolerate recovery. |
-| Shared HTTP endpoint | The application coordinates releases for destinations restored at different times. |
+| Shared HTTP endpoint | Containers in a Pod share its IP. If they use the same port and path, release requests carry no container identity. The application must coordinate which restored containers may resume. |
 | Unprotected HTTP listener | The deployment restricts endpoint access. |
 
 #### Backward compatibility and migration
@@ -111,8 +109,7 @@ the cluster default. Two capture changes may require workload updates:
   contract without `quiesceProbe`.
 
 Upgrade participating agents before enabling contracts: older agents ignore the
-new fields. Before downgrading, stop assigning captures and restores using contracts
-to those agents, including restores from existing artifacts with contract bindings.
+new fields.
 
 ## Design Details
 
@@ -127,29 +124,40 @@ PodSnapshot selects contracts through `spec.applicationContract.containers`, a
 list keyed by source container name:
 
 ```go
+// +kubebuilder:validation:XValidation:rule="!has(self.applicationContract) || self.applicationContract.containers.all(c, c.name in self.source.podRef.containers)",message="bindings must name selected source containers"
 type PodSnapshotSpec struct {
+	// +optional
 	ApplicationContract *ApplicationContractBinding `json:"applicationContract,omitempty"`
 }
 
 type ApplicationContractBinding struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxItems=1
 	// +listType=map
 	// +listMapKey=name
 	Containers []ContainerApplicationContractBinding `json:"containers"`
 }
 
 type ContainerApplicationContractBinding struct {
-	Name        string                       `json:"name"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+	// +kubebuilder:validation:Required
 	ContractRef ApplicationContractReference `json:"contractRef"`
 }
 
 type ApplicationContractReference struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Name string `json:"name"`
 }
 ```
 
 Each `name` must match a container in `spec.source.podRef.containers`.
 `contractRef.name` must be a nonempty Kubernetes resource name. Bindings are
-immutable with the PodSnapshot or SnapshotJob spec.
+immutable with the existing PodSnapshot or SnapshotJob spec validation.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -174,7 +182,9 @@ Add `applicationContract` to `SnapshotJob.spec.podSnapshotTemplate`. The control
 copies it into the generated PodSnapshot. Each entry must name a target container.
 
 ```go
+// +kubebuilder:validation:XValidation:rule="!has(self.applicationContract) || self.applicationContract.containers.all(c, c.name in self.targetContainers)",message="bindings must name target containers"
 type PodSnapshotTemplate struct {
+	// +optional
 	ApplicationContract *ApplicationContractBinding `json:"applicationContract,omitempty"`
 }
 ```
@@ -193,49 +203,85 @@ spec:
 #### ClusterApplicationContract
 
 ClusterApplicationContract is cluster-scoped with an immutable spec. Administrators
-can publish a new name or delete and recreate an existing one. Name-only references
-always select a ClusterApplicationContract, including in saved checkpoints.
-References do not bind to UIDs; no `kind` field is introduced.
+can publish a new name or delete and recreate an existing one. Contracts are
+referenced by name, including in saved checkpoints.
 
 ```go
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
+// +kubebuilder:validation:XValidation:rule="!(has(self.quiesceProbe) && has(self.quiesceProbe.file) && has(self.restoreRelease) && has(self.restoreRelease.file)) || self.quiesceProbe.file.path != self.restoreRelease.file.path",message="probe and release file paths must differ"
 type ClusterApplicationContractSpec struct {
-	QuiesceProbe   *QuiesceProbe   `json:"quiesceProbe,omitempty"`
+	// +optional
+	QuiesceProbe *QuiesceProbe `json:"quiesceProbe,omitempty"`
+	// +optional
 	RestoreRelease *RestoreRelease `json:"restoreRelease,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.file) != has(self.httpGet)",message="select exactly one of file or httpGet"
 type QuiesceProbe struct {
 	QuiesceProbeHandler `json:",inline"`
 
+	// +optional
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
 	InitialDelaySeconds int32 `json:"initialDelaySeconds,omitempty"`
-	PeriodSeconds       int32 `json:"periodSeconds,omitempty"`
-	TimeoutSeconds      int32 `json:"timeoutSeconds,omitempty"`
-	SuccessThreshold    int32 `json:"successThreshold,omitempty"`
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	PeriodSeconds int32 `json:"periodSeconds,omitempty"`
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	SuccessThreshold int32 `json:"successThreshold,omitempty"`
 }
 
 type QuiesceProbeHandler struct {
-	File    *ControlFileAction   `json:"file,omitempty"`
+	// +optional
+	File *ControlFileAction `json:"file,omitempty"`
+	// +optional
 	HTTPGet *LifecycleHTTPAction `json:"httpGet,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.file) != has(self.httpPost)",message="select exactly one of file or httpPost"
 type RestoreRelease struct {
 	RestoreReleaseHandler `json:",inline"`
 
-	PeriodSeconds  int32 `json:"periodSeconds,omitempty"`
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	PeriodSeconds int32 `json:"periodSeconds,omitempty"`
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
 	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 }
 
 type RestoreReleaseHandler struct {
-	File     *ControlFileAction   `json:"file,omitempty"`
+	// +optional
+	File *ControlFileAction `json:"file,omitempty"`
+	// +optional
 	HTTPPost *LifecycleHTTPAction `json:"httpPost,omitempty"`
 }
 
 type ControlFileAction struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=4096
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && self.split('/').all(p, p != '.' && p != '..')",message="path must be absolute without dot components"
 	Path string `json:"path"`
 }
 
 type LifecycleHTTPAction struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=4096
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.startsWith('//') && !self.contains('?') && !self.contains('#')",message="path must start with / and have no authority, query, or fragment"
 	Path string `json:"path"`
-	Port int32  `json:"port"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
 }
 ```
 
@@ -251,10 +297,12 @@ There is no `failureThreshold`: a failed check resets the success count and keep
 waiting without restarting the container. Reset the count when the source container
 restarts or is replaced; measure initial delay from that container's start time.
 
+File and HTTP paths are limited to 4096 characters.
 File paths must be absolute within the selected container's filesystem; they
 do not depend on `SNAPSHOT_CONTROL_DIR`. Reject `.` and `..` path components.
 Probe and release paths must differ. Snapshot's internal control files remain
 reserved; the default contract's readiness and release markers are allowed.
+The agent enforces reserved paths and filesystem isolation at runtime.
 The application must provide the release file's parent directory.
 
 HTTP paths must begin with `/` and contain no authority, query, or fragment.
@@ -301,7 +349,7 @@ spec:
 Add optional `applicationContract` to `PodSnapshotContentSpec` and checkpoint metadata.
 Before capture, the operator fills missing bindings with the configured default
 and saves all selected names in the immutable content spec. The agent includes
-these bindings in the checkpoint; definitions and UIDs are not stored there.
+these bindings in the checkpoint; contract definitions are not stored there.
 Changing the default affects only captures whose bindings are not yet saved.
 
 Restore maps source bindings to destination containers. Destination Pods do not
@@ -329,15 +377,10 @@ safe after reporting capture readiness.
 
 ```mermaid
 flowchart TD
-    A[Restore request] --> B{Existing attempt?}
-    B -->|Yes| C[Recover recorded progress using saved definitions]
-    B -->|No| D[Resolve recorded contract names to current definitions]
-    D --> E{Contracts available?}
-    E -->|No| F[Wait and retry lookup]
-    F --> D
-    E -->|Yes| G[Restore container]
-    G --> H[Notify application if release is configured]
-    H --> I[Complete restore]
+    A[Restore process and GPU state] --> B{restoreRelease configured?}
+    B -->|Yes| C[Notify application using file or HTTP]
+    C --> D[Complete restore after notification succeeds]
+    B -->|No| E[Complete restore without notification]
 ```
 
 New restore attempts use current definitions; active attempts keep saved definitions
@@ -354,48 +397,24 @@ survives retries and restarts. If release completion is not recorded in time,
 fail and clean up, even if the application received a notification whose response
 was lost.
 
-#### Recovery guarantees
-
-Attempt progress survives agent restarts. Only one agent may execute or recover
-a destination attempt, and recovery must verify the destination's identity.
-Stale release markers must not release a restored process early.
-
-```mermaid
-flowchart TD
-    A[Recover an interrupted attempt] --> B{Recorded progress}
-    B -->|Release complete| C[Repair startup marker and status]
-    B -->|Runtime restored| D{Original deadline expired?}
-    B -->|Runtime completion uncertain| E[Fail and clean up]
-    D -->|Yes| E
-    D -->|No| F[Retry release only]
-    F --> G{Release completion recorded?}
-    G -->|No| D
-    G -->|Yes| C
-    C --> H[Finish even after deadline expiry]
-```
-
-Recovery never repeats CRIU restore in the same container. An omitted release
-also records completion and publishes the startup marker.
-
-Restores with contract bindings use agent-owned recovery records, not workload-written
-markers. Legacy restores without a record keep marker-based recovery.
-
 ### Security
 
-Kubernetes RBAC governs contract management. A binding on PodSnapshot can trigger
-application actions without changing the Pod, so it does not establish the Pod
-owner's consent. Authorization must cover both the request and the target Pod.
+#### RBAC
 
-HTTP requests go directly to the Pod IP without redirects or environment proxies.
-Reject host-network Pods for HTTP actions. Containers share the Pod network, so
-HTTP permissions must account for the whole Pod. Deployments must restrict
-access to the unencrypted control listener.
+Kubernetes RBAC controls who can manage contracts and create snapshot requests.
+Selecting a contract invokes actions on a Pod without changing its spec.
+Authorization must therefore cover the target Pod as well as the request.
 
-Resolve file paths inside the selected container's filesystem, never the host
-root; reject symlinks and path traversal. Shared mounts can expose writes beyond
-the container, so authorization must account for them. Protect bindings and
-attempt records as agent-owned metadata.
-Logs and Events must not include response bodies or application memory.
+#### Transport isolation
+
+HTTP calls use the target Pod IP without redirects or environment proxies.
+HTTP actions do not support host-network Pods. Deployments must restrict listener
+access; containers in the same Pod share its network.
+
+Resolve file paths in the target container, never the host root. Reject symlinks
+and traversal, and account for writes through shared mounts when authorizing
+access. Protect agent-owned metadata; exclude response bodies and application
+memory from logs and Events.
 
 **Open question:** should HTTP authentication be supported initially, and how
 should capture and restore obtain credentials? The API has no credential fields.
@@ -441,8 +460,8 @@ Log routine unsuccessful probe polls only at debug level.
   defaults, immutable specs, unique container names, and target membership.
   Check binding propagation from SnapshotJob through checkpoint metadata.
 - **Capture:** test success thresholds, source restarts, cancellation, deadlines,
-  and Pod readiness fallback. Verify user probe preservation, direct default-file
-  checks, and startup gating only when enabled and no user startup probe exists.
+  and Pod readiness fallback. Verify user probe preservation and existing default
+  probe behavior when probes are omitted, alongside direct file checks.
 - **Contracts:** test installation, default changes, explicit precedence, and
   persisted bindings. Missing contracts block new attempts; recreation unblocks
   them. Active attempts keep their definitions across deletion and agent restart.
@@ -459,15 +478,6 @@ Log routine unsuccessful probe polls only at debug level.
   recovery, and custom probes. Advertise only validated combinations and document
   supported engine versions, topologies, and required application settings.
 
-### Graduation Criteria
-
-Alpha requires the API validation, legacy compatibility, and transport/recovery
-tests, with documented supported application versions and topologies.
-Beta requires operational evidence under repeated agent restarts and a security
-review of the privileged execution paths. GA requires a stable application
-contract, compatibility coverage for previously produced artifacts, and
-documented failure and recovery procedures.
-
 ## Appendix
 
 ### References
@@ -476,4 +486,3 @@ documented failure and recovery procedures.
 - [Restore Pod contract](../../reference/restore-pod-contract.md)
 - [Kubernetes probes](https://kubernetes.io/docs/concepts/workloads/pods/probes/)
 - [Kubernetes lifecycle hooks](https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/)
-- [gVisor application-driven checkpoint/restore](https://gvisor.dev/docs/user_guide/checkpoint_restore/#application-driven-checkpointrestore)
