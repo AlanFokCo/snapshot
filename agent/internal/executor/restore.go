@@ -278,7 +278,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	direct := req.PageBrokerRestoreMode != "staged"
 	var staged string
 	preparationAttempted = true
-	if direct {
+	if usePageBrokerGPU {
+		staged, gpu, err = broker.PrepareGPURestore(ctx, transactionID, artifactPath, direct, gpuContext)
+	} else if direct {
 		err = broker.DirectRestore(ctx, transactionID, artifactPath)
 	} else {
 		staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
@@ -287,12 +289,6 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
 		return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
-	}
-	if usePageBrokerGPU {
-		gpu, err = broker.OpenCustomStorageExecution(transactionID, gpuContext)
-		if err != nil {
-			return RestoreResult{}, err
-		}
 	}
 	mountStart := time.Now()
 	sourceMount, containerCheckpointPath, err := mountRestoreSource(ctx, mounts, bundleMount, direct, artifactPath, staged)
@@ -659,16 +655,18 @@ func addCustomStorageFiles(ctx context.Context, cmd *exec.Cmd, execution *pagebr
 	hostProcFD := socketDirectoryFD + 1
 	socketFD := socketDirectoryFD + 2
 	cancelFD := socketDirectoryFD + 3
+	brokerProcessFD := socketDirectoryFD + 4
 	cmd.Args = append(cmd.Args,
 		"--pagebroker-transaction", execution.TransactionID,
 		"--pagebroker-socket-directory-fd", strconv.Itoa(socketDirectoryFD),
 		"--host-proc-fd", strconv.Itoa(hostProcFD),
 		"--pagebroker-execution-fd", strconv.Itoa(socketFD),
 		"--cancel-fd", strconv.Itoa(cancelFD),
+		"--pagebroker-process-fd", strconv.Itoa(brokerProcessFD),
 		"--pagebroker-socket-name", execution.SocketName,
 		"--gpu-context", string(gpuContext),
 	)
-	cmd.ExtraFiles = append(cmd.ExtraFiles, execution.SocketDirectory, hostProc, execution.Socket, cancelRead)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, execution.SocketDirectory, hostProc, execution.Socket, cancelRead, execution.BrokerProcess)
 	return func() {
 		stopCancel()
 		cancelRead.Close()
