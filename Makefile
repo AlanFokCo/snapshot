@@ -31,7 +31,7 @@ AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfil
 AGENT_PLATFORM ?= linux/amd64
 
 .PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
-        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
+        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker docker-build-pagebroker-smoke \
         capture-base-packages verify-base-packages \
         linux-build linux-test pagebroker-check-generated cpu-e2e
 
@@ -195,3 +195,8 @@ docker-build-pagebroker:
 	  --build-context=model-streamer-headers="$(MODEL_STREAMER_INCLUDE_DIR)" \
 	  --build-context=model-streamer-legal="$(MODEL_STREAMER_LEGAL_DIR)" \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker:$(t)) agent/pagebroker/
+
+docker-build-pagebroker-smoke:
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" \
+	  -f agent/pagebroker/tests/k3s/Dockerfile \
+	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker-smoke:$(t)) .
