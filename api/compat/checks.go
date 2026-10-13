@@ -10,6 +10,7 @@ import (
 
 	digest "github.com/opencontainers/go-digest"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // CheckCPUArch refuses a restore onto a different instruction set. A checkpoint
@@ -35,21 +36,12 @@ var cpuFeaturesCheck = check{
 		if len(source.CPUFeatures) == 0 || len(target.CPUFeatures) == 0 {
 			return nil
 		}
-		offered := make(map[string]bool, len(target.CPUFeatures))
-		for _, feature := range target.CPUFeatures {
-			offered[feature] = true
-		}
-		var missing []string
-		for _, feature := range InstructionSetFeatures(source.CPUFeatures) {
-			if !offered[feature] {
-				missing = append(missing, feature)
-			}
-		}
-		if len(missing) == 0 {
+		missing := sets.New(InstructionSetFeatures(source.CPUFeatures)...).Difference(sets.New(target.CPUFeatures...))
+		if missing.Len() == 0 {
 			return nil
 		}
 		// One mismatch, since an AVX-512 source alone can miss a dozen flags.
-		return []Mismatch{{Source: strings.Join(missing, ","), Target: "missing"}}
+		return []Mismatch{{Source: strings.Join(sets.List(missing), ","), Target: "missing"}}
 	},
 }
 
