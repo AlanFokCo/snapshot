@@ -626,7 +626,7 @@ func (w *NodeController) RestoreDestinations(ctx context.Context, pod *corev1.Po
 		if err != nil {
 			return nil, err
 		}
-		if source, err = singleContainer(snapshot.Spec.Source.PodRef.Containers); err != nil {
+		if source, err = singleTargetContainer(snapshot.Spec.Source.PodRef.Containers); err != nil {
 			return nil, err
 		}
 	}
@@ -644,7 +644,7 @@ func (w *NodeController) RestoreDestinations(ctx context.Context, pod *corev1.Po
 // validateRestoreTarget resolves the captured source and validates every
 // requested destination against the restore Pod.
 func validateRestoreTarget(pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent) (*restoreTarget, []podcontract.ContainerMapping, error) {
-	containerName, err := singleTargetContainer(content)
+	containerName, err := singleTargetContainer(content.Spec.Source.PodRef.Containers)
 	if err != nil {
 		return nil, nil, err
 	}
