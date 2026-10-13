@@ -404,6 +404,15 @@ IsAllowedClient(int connection)
   return true;
 }
 
+// The broker pins itself while alive. No peer PID lookup or namespace
+// translation. SCM_RIGHTS sends a copy, so every preparation reply shares it.
+int
+BrokerPidfd()
+{
+  static const FileDescriptor pidfd(static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0)));
+  return pidfd.get();
+}
+
 bool
 IsOwnProcessDescriptor(int descriptor)
 {
@@ -532,8 +541,10 @@ HandleConnection(int connection, Broker& broker, GpuConnections& gpu_connections
         // A socket path can be replaced between preparation and submission.
         // Only the broker pinned during preparation may execute or confirm drain.
         if (descriptors.empty() || !IsOwnProcessDescriptor(descriptors.front().get())) {
-          SendResponse(connection, RequestFailed(request, Failure::INVALID_REQUEST,
-                                                 "broker process descriptor does not match"));
+          const auto rejected =
+              RequestFailed(request, Failure::INVALID_REQUEST, "broker process descriptor does not match");
+          LogOutcome(request, rejected);
+          SendResponse(connection, rejected);
           return;
         }
         descriptors.erase(descriptors.begin());
@@ -564,19 +575,9 @@ HandleConnection(int connection, Broker& broker, GpuConnections& gpu_connections
     }
   }
 
-  if (request.request_broker_pidfd() &&
-      (response.has_direct_checkpoint_directory() || response.has_staged_checkpoint_directory() ||
-       response.has_direct_restore_ready() || response.has_staged_restore_directory())) {
-    // The broker pins itself while alive. No peer PID lookup or namespace translation.
-    FileDescriptor pidfd(static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0)));
-    if (pidfd.get() < 0) {
-      SendResponse(connection, RequestFailed(request, Failure::INTERNAL_ERROR, "open broker pidfd"));
-    } else {
-      SendResponse(connection, response, pidfd.get());
-    }
-    return;
-  }
-  SendResponse(connection, response);
+  const bool prepared = response.has_direct_checkpoint_directory() || response.has_staged_checkpoint_directory() ||
+                        response.has_direct_restore_ready() || response.has_staged_restore_directory();
+  SendResponse(connection, response, request.request_broker_pidfd() && prepared ? BrokerPidfd() : -1);
 }
 
 void
@@ -739,6 +740,8 @@ RunDaemon(const DaemonOptions& options)
   snapshot::pagebroker::FatalCleanupShutdown cleanup_shutdown(shutting_down);
   if (!RaiseFileDescriptorLimit())
     return ExitCode::FAILURE;
+  if (BrokerPidfd() < 0)
+    return Fail("open broker pidfd", {errno, std::generic_category()});
   if (const auto error = InstallSignalHandlers(); error)
     return Fail("install signal handlers", error);
   if (const auto error = PrepareDirectories(options.socket_path, options.staging_directory); error)

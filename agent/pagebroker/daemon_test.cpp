@@ -839,13 +839,15 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
                          fs::directory_iterator());
   }
 
+  // The broker holds its own pidfd from startup, so wait for a received one.
   bool WaitForPidfd() const
   {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     do {
+      int pidfds = 0;
       for (const auto& entry : fs::directory_iterator("/proc/" + std::to_string(server_) + "/fd")) {
         std::error_code error;
-        if (fs::read_symlink(entry, error) == "anon_inode:[pidfd]") {
+        if (fs::read_symlink(entry, error) == "anon_inode:[pidfd]" && ++pidfds > 1) {
           return true;
         }
       }
