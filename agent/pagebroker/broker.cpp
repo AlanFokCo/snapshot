@@ -337,6 +337,12 @@ Broker::CleanupTransactionDirectory(const std::string& id, Transaction& transact
 }
 
 void
+Broker::SetClock(Clock clock)
+{
+  now_ = std::move(clock);
+}
+
+void
 Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
 {
   for (const auto& [id, transaction] : TransactionSnapshot()) {
@@ -627,6 +633,9 @@ Broker::Commit(const Request& request)
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::ABORTED) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   }
+  if (transaction->expired(now_(), kLiveTransactionLifetime)) {
+    return Fail(request, Failure::TRANSACTION_EXPIRED, "transaction expired");
+  }
   if (transaction->state() == Transaction::State::PREPARING) {
     return Fail(request, Failure::TRANSACTION_CONFLICT, "transaction is preparing");
   }
@@ -705,6 +714,9 @@ Broker::Abort(const Request& request)
   }
   if (transaction->state() == Transaction::State::ABORTED) {
     return AbortSucceeded(request);
+  }
+  if (transaction->expired(now_(), kLiveTransactionLifetime)) {
+    return Fail(request, Failure::TRANSACTION_EXPIRED, "transaction expired");
   }
   if (const auto operation = transaction->gpu_operation) {
     BeginAbort(*transaction);
