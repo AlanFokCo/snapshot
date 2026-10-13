@@ -29,7 +29,7 @@ func TestSharedProtocolFixtures(t *testing.T) {
 	if err := json.Unmarshal(data, &fixtures); err != nil {
 		t.Fatal(err)
 	}
-	if len(fixtures.Cases) != 21 {
+	if len(fixtures.Cases) != 22 {
 		t.Fatalf("missing wire fixtures: %d", len(fixtures.Cases))
 	}
 	for _, fixture := range fixtures.Cases {

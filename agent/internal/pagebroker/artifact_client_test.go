@@ -107,7 +107,16 @@ func TestArtifactAndLegacySelectors(t *testing.T) {
 			&Response_StagedRestoreDirectory{StagedRestoreDirectory: &StagedRestoreDirectory{ImageDirectory: proto.String("/staging/restore/tx")}}},
 		{"metadata", &Request_GetArtifactMetadata{GetArtifactMetadata: &GetArtifactMetadataRequest{Artifact: artifact}},
 			func(c Client, ctx context.Context) (string, error) { return c.GetArtifactMetadata(ctx, "tx", artifact) },
-			&Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{ManifestDirectory: "/staging/metadata/tx"}}},
+			&Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{ManifestDirectory: "/staging/metadata/tx", Artifact: artifact}}},
+		{"metadata lookup", &Request_GetArtifactMetadata{GetArtifactMetadata: &GetArtifactMetadataRequest{Target: target}},
+			func(c Client, ctx context.Context) (string, error) {
+				resolved, directory, err := c.LookupArtifactMetadata(ctx, "tx", target)
+				if err == nil && !proto.Equal(resolved, artifact) {
+					return "", fmt.Errorf("resolved %v", resolved)
+				}
+				return directory, err
+			},
+			&Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{ManifestDirectory: "/staging/metadata/tx", Artifact: artifact}}},
 		{"legacy checkpoint", &Request_PrepareStagedCheckpoint{PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Destination: filesystem("/checkpoints/destination"), IoEngine: posixCopy()}},
 			func(c Client, ctx context.Context) (string, error) {
 				return c.PrepareCheckpoint(ctx, "tx", "/checkpoints/destination")
@@ -268,19 +277,58 @@ func TestFailureMessageLimitsPreserveLegacyDiagnostics(t *testing.T) {
 }
 
 func TestMetadataRejectsOtherOrEmptyResults(t *testing.T) {
-	for _, result := range []isResponse_Result{
-		&Response_CommitComplete{CommitComplete: &CommitComplete{}},
-		&Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{}},
+	artifact := testPublication()
+	target := &ArtifactTarget{StoreId: artifact.StoreId, Artifact: &ArtifactIdentity{ArtifactUid: "content-1", ContainerName: "main"}}
+	directory := "/staging/metadata/tx"
+	for _, tc := range []struct {
+		name          string
+		result        isResponse_Result
+		lookupAccepts bool
+	}{
+		{"wrong result", &Response_CommitComplete{CommitComplete: &CommitComplete{}}, false},
+		{"empty result", &Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{}}, false},
+		{"missing artifact", &Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{ManifestDirectory: directory}}, false},
+		{"other publication", &Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{
+			ManifestDirectory: directory,
+			Artifact:          &PublishedArtifact{StoreId: artifact.StoreId, ArtifactHandle: "artifacts/content-2/containers/main/index.json"},
+		}}, true},
+		{"other store", &Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{
+			ManifestDirectory: directory,
+			Artifact:          &PublishedArtifact{StoreId: "store-v1-" + strings.Repeat("b", 64), ArtifactHandle: artifact.ArtifactHandle},
+		}}, false},
 	} {
-		client := artifactTestServer(t, func(connection net.Conn, request *Request) error {
-			return sendResponse(connection, replyFor(request, result))
+		t.Run(tc.name, func(t *testing.T) {
+			client := artifactTestServer(t, func(connection net.Conn, request *Request) error {
+				return sendResponse(connection, replyFor(request, tc.result))
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if _, err := client.GetArtifactMetadata(ctx, "tx", artifact); err == nil {
+				t.Fatal("accepted invalid metadata result")
+			}
+			_, _, err := client.LookupArtifactMetadata(ctx, "tx", target)
+			if (err == nil) != tc.lookupAccepts {
+				t.Fatalf("lookup accepted = %v, want %v: %v", err == nil, tc.lookupAccepts, err)
+			}
 		})
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_, err := client.GetArtifactMetadata(ctx, "tx", testPublication())
-		cancel()
-		if err == nil {
-			t.Fatal("accepted invalid metadata result")
+	}
+}
+
+func TestLookupReportsMissingPublicationAsTypedFailure(t *testing.T) {
+	code := Failure_ARTIFACT_NOT_FOUND
+	client := artifactTestServer(t, func(connection net.Conn, request *Request) error {
+		if request.GetGetArtifactMetadata().GetTarget() == nil {
+			return fmt.Errorf("lookup did not carry a target: %v", request)
 		}
+		return sendResponse(connection, replyFor(request, &Response_Failure{Failure: &Failure{Code: &code, Message: proto.String("no publication")}}))
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	target := &ArtifactTarget{StoreId: testPublication().StoreId, Artifact: &ArtifactIdentity{ArtifactUid: "content-1", ContainerName: "main"}}
+	resolved, directory, err := client.LookupArtifactMetadata(ctx, "tx", target)
+	var failure *FailureError
+	if !errors.As(err, &failure) || failure.Code() != Failure_ARTIFACT_NOT_FOUND || resolved != nil || directory != "" {
+		t.Fatalf("LookupArtifactMetadata() = %v, %q, %v", resolved, directory, err)
 	}
 }
 
@@ -301,6 +349,10 @@ func TestArtifactRequestsValidateBeforeConnecting(t *testing.T) {
 		_, err := client.PrepareArtifactCheckpoint(ctx, "tx", target, nil)
 		if err == nil || isTransportError(err) {
 			t.Fatalf("invalid target: %v", err)
+		}
+		_, _, err = client.LookupArtifactMetadata(ctx, "tx", target)
+		if err == nil || isTransportError(err) {
+			t.Fatalf("invalid lookup target: %v", err)
 		}
 	}
 	artifact := testPublication()

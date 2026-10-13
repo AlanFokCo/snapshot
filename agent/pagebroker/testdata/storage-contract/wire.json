@@ -31,6 +31,12 @@
       "wire_hex": "0a09726571756573742d31120474782d31a2017d0a7b0a4973746f72652d76312d61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161122e6172746966616374732f636f6e74656e742d312f636f6e7461696e6572732f6d61696e2f696e6465782e6a736f6e"
     },
     {
+      "name": "metadata-lookup",
+      "type": "Request",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" get_artifact_metadata { target { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact { artifact_uid: \"content-1\" container_name: \"main\" } } }",
+      "wire_hex": "0a09726571756573742d31120474782d31a20160125e0a4973746f72652d76312d6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616112110a09636f6e74656e742d3112046d61696e"
+    },
+    {
       "name": "commit-request",
       "type": "Request",
       "text": "request_id: \"request-1\" transaction_id: \"tx-1\" commit {}",
@@ -63,8 +69,8 @@
     {
       "name": "metadata-result",
       "type": "Response",
-      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" get_artifact_metadata_complete { manifest_directory: \"/staging/metadata/tx-1\" }",
-      "wire_hex": "0a09726571756573742d31120474782d31a201180a162f73746167696e672f6d657461646174612f74782d31"
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" get_artifact_metadata_complete { manifest_directory: \"/staging/metadata/tx-1\" artifact { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact_handle: \"artifacts/content-1/containers/main/index.json\" } }",
+      "wire_hex": "0a09726571756573742d31120474782d31a20195010a162f73746167696e672f6d657461646174612f74782d31127b0a4973746f72652d76312d61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161122e6172746966616374732f636f6e74656e742d312f636f6e7461696e6572732f6d61696e2f696e6465782e6a736f6e"
     },
     {
       "name": "checkpoint-directory",

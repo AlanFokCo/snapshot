@@ -96,11 +96,18 @@ message PrepareStagedCheckpointRequest
   IOEngine io_engine = 2;
   ArtifactTarget target = 3;  // Validate the configured store and destination before capture.
 }
-// Fetch verified manifest.yaml for this exact publication into private shared staging.
+// Fetch verified manifest.yaml for one publication into private shared staging.
 // Snapshot interprets the manifest. This does not verify all checkpoint payloads.
 message GetArtifactMetadataRequest
 {
+  // Exactly one of artifact or target is required.
+  // Exact committed publication, as persisted after checkpoint Commit.
   PublishedArtifact artifact = 1;
+  // Identity lookup for a publication whose descriptor was never received, for example
+  // after a lost Commit reply or an agent restart. Resolves the single publication for
+  // that store, artifact UID and container, or fails with ARTIFACT_NOT_FOUND. Reads only;
+  // it never creates, completes or substitutes a publication.
+  ArtifactTarget target = 2;
 }
 message PrepareDirectCheckpointRequest
 {
@@ -178,6 +185,9 @@ message GetArtifactMetadataComplete
 {
   // Absolute local directory, shared with Snapshot; valid until Abort or metadata transaction expiry.
   string manifest_directory = 1;
+  // The publication the manifest was read from: the request's artifact unchanged, or the
+  // descriptor resolved from its target. Always present; callers persist it unchanged.
+  PublishedArtifact artifact = 2;
 }
 // GPU work and cleanup have finished before transaction files are released.
 // This does not stop a workload that has already restored successfully.

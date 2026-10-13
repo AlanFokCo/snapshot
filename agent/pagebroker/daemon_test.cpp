@@ -1114,6 +1114,13 @@ TEST_F(BrokerTest, RejectsUnsupportedArtifactSelectorsWithOrWithoutEngine)
   EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
   request.mutable_staged_restore()->mutable_io_engine()->mutable_posix_copy();
   EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+
+  request = RequestFor("metadata-subject");
+  request.mutable_get_artifact_metadata();
+  EXPECT_EQ(broker().HandleRequest(request).failure().message(), "metadata subject is required");
+  request.mutable_get_artifact_metadata()->mutable_artifact();
+  request.mutable_get_artifact_metadata()->mutable_target();
+  EXPECT_EQ(broker().HandleRequest(request).failure().message(), "artifact cannot be combined with target");
 }
 
 TEST_F(BrokerTest, MetadataIsExplicitlyUnsupportedWithoutCreatingTransaction)
@@ -1128,6 +1135,12 @@ TEST_F(BrokerTest, MetadataIsExplicitlyUnsupportedWithoutCreatingTransaction)
   EXPECT_EQ(rejected.failure().message(), "artifact metadata retrieval is not implemented");
   EXPECT_EQ(rejected.request_id(), request.request_id());
   EXPECT_EQ(rejected.transaction_id(), request.transaction_id());
+
+  auto* target = request.mutable_get_artifact_metadata()->mutable_target();
+  target->set_store_id("store-v1-" + std::string(64, 'a'));
+  target->mutable_artifact()->set_artifact_uid("content-1");
+  target->mutable_artifact()->set_container_name("main");
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
 
   request.mutable_commit();
   EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);

@@ -1003,11 +1003,18 @@ func (x *PrepareStagedCheckpointRequest) GetTarget() *ArtifactTarget {
 	return nil
 }
 
-// Fetch verified manifest.yaml for this exact publication into private shared staging.
+// Fetch verified manifest.yaml for one publication into private shared staging.
 // Snapshot interprets the manifest. This does not verify all checkpoint payloads.
 type GetArtifactMetadataRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Artifact      *PublishedArtifact     `protobuf:"bytes,1,opt,name=artifact,proto3" json:"artifact,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Exactly one of artifact or target is required.
+	// Exact committed publication, as persisted after checkpoint Commit.
+	Artifact *PublishedArtifact `protobuf:"bytes,1,opt,name=artifact,proto3" json:"artifact,omitempty"`
+	// Identity lookup for a publication whose descriptor was never received, for example
+	// after a lost Commit reply or an agent restart. Resolves the single publication for
+	// that store, artifact UID and container, or fails with ARTIFACT_NOT_FOUND. Reads only;
+	// it never creates, completes or substitutes a publication.
+	Target        *ArtifactTarget `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1045,6 +1052,13 @@ func (*GetArtifactMetadataRequest) Descriptor() ([]byte, []int) {
 func (x *GetArtifactMetadataRequest) GetArtifact() *PublishedArtifact {
 	if x != nil {
 		return x.Artifact
+	}
+	return nil
+}
+
+func (x *GetArtifactMetadataRequest) GetTarget() *ArtifactTarget {
+	if x != nil {
+		return x.Target
 	}
 	return nil
 }
@@ -1786,8 +1800,11 @@ type GetArtifactMetadataComplete struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Absolute local directory, shared with Snapshot; valid until Abort or metadata transaction expiry.
 	ManifestDirectory string `protobuf:"bytes,1,opt,name=manifest_directory,json=manifestDirectory,proto3" json:"manifest_directory,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The publication the manifest was read from: the request's artifact unchanged, or the
+	// descriptor resolved from its target. Always present; callers persist it unchanged.
+	Artifact      *PublishedArtifact `protobuf:"bytes,2,opt,name=artifact,proto3" json:"artifact,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetArtifactMetadataComplete) Reset() {
@@ -1825,6 +1842,13 @@ func (x *GetArtifactMetadataComplete) GetManifestDirectory() string {
 		return x.ManifestDirectory
 	}
 	return ""
+}
+
+func (x *GetArtifactMetadataComplete) GetArtifact() *PublishedArtifact {
+	if x != nil {
+		return x.Artifact
+	}
+	return nil
 }
 
 // GPU work and cleanup have finished before transaction files are released.
@@ -2263,9 +2287,10 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x1ePrepareStagedCheckpointRequest\x12H\n" +
 	"\vdestination\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\vdestination\x12=\n" +
 	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\x12>\n" +
-	"\x06target\x18\x03 \x01(\v2&.snapshot.pagebroker.v1.ArtifactTargetR\x06target\"c\n" +
+	"\x06target\x18\x03 \x01(\v2&.snapshot.pagebroker.v1.ArtifactTargetR\x06target\"\xa3\x01\n" +
 	"\x1aGetArtifactMetadataRequest\x12E\n" +
-	"\bartifact\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactR\bartifact\"\xa9\x01\n" +
+	"\bartifact\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactR\bartifact\x12>\n" +
+	"\x06target\x18\x02 \x01(\v2&.snapshot.pagebroker.v1.ArtifactTargetR\x06target\"\xa9\x01\n" +
 	"\x1ePrepareDirectCheckpointRequest\x12H\n" +
 	"\vdestination\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\vdestination\x12=\n" +
 	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\x0f\n" +
@@ -2309,9 +2334,10 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x0fimage_directory\x18\x01 \x01(\tH\x00R\x0eimageDirectory\x88\x01\x01B\x12\n" +
 	"\x10_image_directory\"j\n" +
 	"\x0eCommitComplete\x12X\n" +
-	"\x12published_artifact\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactR\x11publishedArtifact\"L\n" +
+	"\x12published_artifact\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactR\x11publishedArtifact\"\x93\x01\n" +
 	"\x1bGetArtifactMetadataComplete\x12-\n" +
-	"\x12manifest_directory\x18\x01 \x01(\tR\x11manifestDirectory\"\x0f\n" +
+	"\x12manifest_directory\x18\x01 \x01(\tR\x11manifestDirectory\x12E\n" +
+	"\bartifact\x18\x02 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactR\bartifact\"\x0f\n" +
 	"\rAbortComplete\"\xe8\x03\n" +
 	"\aFailure\x12=\n" +
 	"\x04code\x18\x01 \x01(\x0e2$.snapshot.pagebroker.v1.Failure.CodeH\x00R\x04code\x88\x01\x01\x12\x1d\n" +
@@ -2427,37 +2453,39 @@ var file_v1_pagebroker_proto_depIdxs = []int32{
 	4,  // 15: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
 	12, // 16: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.target:type_name -> snapshot.pagebroker.v1.ArtifactTarget
 	13, // 17: snapshot.pagebroker.v1.GetArtifactMetadataRequest.artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
-	2,  // 18: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 19: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	14, // 20: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
-	16, // 21: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
-	19, // 22: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
-	20, // 23: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
-	15, // 24: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
-	18, // 25: snapshot.pagebroker.v1.Request.prepare_direct_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareDirectCheckpointRequest
-	8,  // 26: snapshot.pagebroker.v1.Request.checkpoint_gpu:type_name -> snapshot.pagebroker.v1.CheckpointGpuRequest
-	9,  // 27: snapshot.pagebroker.v1.Request.restore_gpu:type_name -> snapshot.pagebroker.v1.RestoreGpuRequest
-	10, // 28: snapshot.pagebroker.v1.Request.capabilities:type_name -> snapshot.pagebroker.v1.CapabilitiesRequest
-	17, // 29: snapshot.pagebroker.v1.Request.get_artifact_metadata:type_name -> snapshot.pagebroker.v1.GetArtifactMetadataRequest
-	26, // 30: snapshot.pagebroker.v1.GpuComplete.participants:type_name -> snapshot.pagebroker.v1.GpuParticipantResult
-	13, // 31: snapshot.pagebroker.v1.CommitComplete.published_artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
-	0,  // 32: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
-	22, // 33: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
-	28, // 34: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
-	29, // 35: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
-	31, // 36: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
-	32, // 37: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
-	23, // 38: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
-	24, // 39: snapshot.pagebroker.v1.Response.direct_checkpoint_directory:type_name -> snapshot.pagebroker.v1.DirectCheckpointDirectory
-	27, // 40: snapshot.pagebroker.v1.Response.gpu_checkpoint_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
-	27, // 41: snapshot.pagebroker.v1.Response.gpu_restore_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
-	25, // 42: snapshot.pagebroker.v1.Response.capabilities:type_name -> snapshot.pagebroker.v1.Capabilities
-	30, // 43: snapshot.pagebroker.v1.Response.get_artifact_metadata_complete:type_name -> snapshot.pagebroker.v1.GetArtifactMetadataComplete
-	44, // [44:44] is the sub-list for method output_type
-	44, // [44:44] is the sub-list for method input_type
-	44, // [44:44] is the sub-list for extension type_name
-	44, // [44:44] is the sub-list for extension extendee
-	0,  // [0:44] is the sub-list for field type_name
+	12, // 18: snapshot.pagebroker.v1.GetArtifactMetadataRequest.target:type_name -> snapshot.pagebroker.v1.ArtifactTarget
+	2,  // 19: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 20: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	14, // 21: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
+	16, // 22: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
+	19, // 23: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
+	20, // 24: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
+	15, // 25: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
+	18, // 26: snapshot.pagebroker.v1.Request.prepare_direct_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareDirectCheckpointRequest
+	8,  // 27: snapshot.pagebroker.v1.Request.checkpoint_gpu:type_name -> snapshot.pagebroker.v1.CheckpointGpuRequest
+	9,  // 28: snapshot.pagebroker.v1.Request.restore_gpu:type_name -> snapshot.pagebroker.v1.RestoreGpuRequest
+	10, // 29: snapshot.pagebroker.v1.Request.capabilities:type_name -> snapshot.pagebroker.v1.CapabilitiesRequest
+	17, // 30: snapshot.pagebroker.v1.Request.get_artifact_metadata:type_name -> snapshot.pagebroker.v1.GetArtifactMetadataRequest
+	26, // 31: snapshot.pagebroker.v1.GpuComplete.participants:type_name -> snapshot.pagebroker.v1.GpuParticipantResult
+	13, // 32: snapshot.pagebroker.v1.CommitComplete.published_artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
+	13, // 33: snapshot.pagebroker.v1.GetArtifactMetadataComplete.artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
+	0,  // 34: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
+	22, // 35: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
+	28, // 36: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
+	29, // 37: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
+	31, // 38: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
+	32, // 39: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
+	23, // 40: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
+	24, // 41: snapshot.pagebroker.v1.Response.direct_checkpoint_directory:type_name -> snapshot.pagebroker.v1.DirectCheckpointDirectory
+	27, // 42: snapshot.pagebroker.v1.Response.gpu_checkpoint_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
+	27, // 43: snapshot.pagebroker.v1.Response.gpu_restore_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
+	25, // 44: snapshot.pagebroker.v1.Response.capabilities:type_name -> snapshot.pagebroker.v1.Capabilities
+	30, // 45: snapshot.pagebroker.v1.Response.get_artifact_metadata_complete:type_name -> snapshot.pagebroker.v1.GetArtifactMetadataComplete
+	46, // [46:46] is the sub-list for method output_type
+	46, // [46:46] is the sub-list for method input_type
+	46, // [46:46] is the sub-list for extension type_name
+	46, // [46:46] is the sub-list for extension extendee
+	0,  // [0:46] is the sub-list for field type_name
 }
 
 func init() { file_v1_pagebroker_proto_init() }
