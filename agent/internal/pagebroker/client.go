@@ -4,6 +4,7 @@
 package pagebroker
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -24,12 +25,11 @@ const (
 	maxMessageSize    = 64 << 10
 	messageHeaderSize = 4
 	commitRetryDelay  = 100 * time.Millisecond
+	dialRetryDelay    = 100 * time.Millisecond
+	dialRetryLimit    = 30 * time.Second
 )
 
-var (
-	commitRetryLimit   = 30 * time.Second
-	errMessageTooLarge = fmt.Errorf("message exceeds %d bytes", maxMessageSize)
-)
+var commitRetryLimit = 30 * time.Second
 
 // Client uses the deployment-wide filesystem/POSIX PageBroker plan.
 type Client struct {
@@ -37,9 +37,7 @@ type Client struct {
 }
 
 func (c Client) StagedRestore(ctx context.Context, transactionID, source string) (string, error) {
-	response, err := c.request(ctx, transactionID, &Request_StagedRestore{
-		StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
-	})
+	response, err := c.request(ctx, transactionID, stagedRestore(source))
 	if err != nil {
 		return "", err
 	}
@@ -59,22 +57,15 @@ func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destinatio
 // DirectRestore prepares a transaction against the original checkpoint directory.
 // The caller must keep its contents available until Commit or Abort.
 func (c Client) DirectRestore(ctx context.Context, transactionID, source string) error {
-	response, err := c.request(ctx, transactionID, &Request_DirectRestore{
-		DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
-	})
+	response, err := c.request(ctx, transactionID, directRestore(source))
 	if err != nil {
 		return err
 	}
-	if response.GetDirectRestoreReady() == nil {
-		return fmt.Errorf("unexpected PageBroker direct restore response")
-	}
-	return nil
+	return directRestoreReady(response)
 }
 
 func (c Client) PrepareDirectCheckpoint(ctx context.Context, transactionID, destination string) (string, error) {
-	response, err := c.request(ctx, transactionID, &Request_PrepareDirectCheckpoint{
-		PrepareDirectCheckpoint: &PrepareDirectCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},
-	})
+	response, err := c.request(ctx, transactionID, prepareDirectCheckpoint(destination))
 	if err != nil {
 		return "", err
 	}
@@ -88,9 +79,16 @@ func imageDirectory(directory string) (string, error) {
 	return directory, nil
 }
 
+func directRestoreReady(response *Response) error {
+	if response.GetDirectRestoreReady() == nil {
+		return fmt.Errorf("unexpected PageBroker direct restore response")
+	}
+	return nil
+}
+
 func (c Client) Commit(ctx context.Context, transactionID string) error {
 	err := c.commit(ctx, transactionID)
-	if !isTransportError(err) {
+	if !isRetryableTransportError(err) {
 		return err
 	}
 	return c.retryCommit(ctx, transactionID)
@@ -105,7 +103,7 @@ func (c Client) retryCommit(ctx context.Context, transactionID string) error {
 			return retryCtx.Err()
 		case <-time.After(commitRetryDelay):
 		}
-		if err := c.commit(retryCtx, transactionID); !isTransportError(err) {
+		if err := c.commit(retryCtx, transactionID); !isRetryableTransportError(err) {
 			return err
 		}
 	}
@@ -122,13 +120,12 @@ func (c Client) commit(ctx context.Context, transactionID string) error {
 	return nil
 }
 
-func isTransportError(err error) bool {
-	var transport transportError
-	return errors.As(err, &transport)
+func (c Client) Abort(ctx context.Context, transactionID string) error {
+	return c.abort(ctx, transactionID)
 }
 
-func (c Client) Abort(ctx context.Context, transactionID string) error {
-	response, err := c.request(ctx, transactionID, &Request_Abort{Abort: &AbortRequest{}})
+func (c Client) abort(ctx context.Context, transactionID string, files ...*os.File) error {
+	response, err := c.request(ctx, transactionID, &Request_Abort{Abort: &AbortRequest{}}, files...)
 	if err != nil {
 		return err
 	}
@@ -138,16 +135,64 @@ func (c Client) Abort(ctx context.Context, transactionID string) error {
 	return nil
 }
 
-func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command) (*Response, error) {
-	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
+func transientDialError(err error) bool {
+	return errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ECONNREFUSED)
+}
+
+func (c Client) dial(ctx context.Context) (net.Conn, error) {
+	dialer := &net.Dialer{}
+	retryCtx, cancel := context.WithTimeout(ctx, dialRetryLimit)
+	defer cancel()
+	for {
+		connection, err := dialer.DialContext(retryCtx, "unix", c.ControlSocketPath)
+		if err == nil {
+			return connection, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !transientDialError(err) {
+			return nil, err
+		}
+		select {
+		case <-retryCtx.Done():
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, err
+		case <-time.After(dialRetryDelay):
+		}
+	}
+}
+
+func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
+	response, _, err := c.requestResponse(ctx, transactionID, &Request{Command: command}, files...)
+	return response, err
+}
+
+func (c Client) requestResponse(ctx context.Context, transactionID string, request *Request, files ...*os.File) (*Response, *os.File, error) {
+	var connection net.Conn
+	var err error
+	if request.GetCapabilities() != nil {
+		// Startup owns its retry budget and must see permanent endpoint errors immediately.
+		connection, err = (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
+	} else {
+		connection, err = c.dial(ctx)
+	}
 	if err != nil {
-		return nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
+		return nil, nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err), dial: true}
 	}
 	defer connection.Close()
-	return exchange(ctx, connection.(*net.UnixConn), transactionID, command)
+	return exchangeResponse(ctx, connection.(*net.UnixConn), transactionID, request, files...)
 }
 
 func exchange(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
+	response, _, err := exchangeResponse(ctx, connection, transactionID, &Request{Command: command}, files...)
+	return response, err
+}
+
+// exchangeResponse returns a broker pidfd only when the request sets RequestBrokerPidfd.
+func exchangeResponse(ctx context.Context, connection *net.UnixConn, transactionID string, request *Request, files ...*os.File) (*Response, *os.File, error) {
 	stopCancel := context.AfterFunc(ctx, func() {
 		_ = connection.CloseWrite()
 		_ = connection.Close()
@@ -155,62 +200,67 @@ func exchange(ctx context.Context, connection *net.UnixConn, transactionID strin
 	defer stopCancel()
 
 	requestID := uuid.NewString()
-	request := &Request{RequestId: &requestID, Command: command}
+	request.RequestId = &requestID
 	if transactionID != "" {
 		request.TransactionId = &transactionID
 	}
 	message, err := proto.Marshal(request)
 	if err != nil {
-		return nil, fmt.Errorf("marshal PageBroker request: %w", err)
+		return nil, nil, fmt.Errorf("marshal PageBroker request: %w", err)
 	}
 	if err := writeRequest(connection, message, files); err != nil {
-		return nil, transportError{cause: fmt.Errorf("write PageBroker request: %w", err)}
+		return nil, nil, transportError{cause: fmt.Errorf("write PageBroker request: %w", err)}
 	}
-	message, err = readMessage(connection)
+	message, receivedFiles, err := readMessageWithFiles(connection)
+	retained := false
+	defer func() {
+		if !retained {
+			for _, fd := range receivedFiles {
+				_ = unix.Close(fd)
+			}
+		}
+	}()
 	if err != nil {
 		if errors.Is(err, errMessageTooLarge) {
-			return nil, err
+			return nil, nil, err
 		}
-		return nil, transportError{cause: fmt.Errorf("read PageBroker response: %w", err)}
+		return nil, nil, transportError{cause: fmt.Errorf("read PageBroker response: %w", err)}
 	}
 	response := new(Response)
 	if err := proto.Unmarshal(message, response); err != nil {
-		return nil, fmt.Errorf("unmarshal PageBroker response: %w", err)
+		return nil, nil, fmt.Errorf("unmarshal PageBroker response: %w", err)
 	}
 	if response.GetRequestId() != requestID || response.GetTransactionId() != transactionID {
-		return nil, fmt.Errorf("PageBroker response identifiers do not match request")
+		return nil, nil, fmt.Errorf("PageBroker response identifiers do not match request")
 	}
 	if failure := response.GetFailure(); failure != nil {
-		return nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
+		return nil, nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
 	}
-	return response, nil
-}
-
-type failureError struct {
-	code    Failure_Code
-	message string
-}
-
-func failureCode(code Failure_Code) Failure_Code {
-	switch code {
-	case Failure_UNSPECIFIED, Failure_INVALID_REQUEST, Failure_TRANSACTION_NOT_FOUND, Failure_TRANSACTION_CONFLICT,
-		Failure_INSUFFICIENT_STORAGE, Failure_STORAGE_ERROR, Failure_INTERNAL_ERROR, Failure_UNAVAILABLE:
-		return code
-	default:
-		return Failure_UNSPECIFIED
+	if len(receivedFiles) > 1 || (len(receivedFiles) == 1 && !request.GetRequestBrokerPidfd()) {
+		return nil, nil, fmt.Errorf("unexpected PageBroker response descriptors")
 	}
+	if len(receivedFiles) == 0 {
+		return response, nil, nil
+	}
+	if err := unix.PidfdSendSignal(receivedFiles[0], 0, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EPERM) {
+		return nil, nil, fmt.Errorf("invalid PageBroker process descriptor: %w", err)
+	}
+	retained = true
+	return response, os.NewFile(uintptr(receivedFiles[0]), "pagebroker-process"), nil
 }
 
-type transportError struct {
-	cause error
+func stagedRestore(source string) isRequest_Command {
+	return &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()}}
 }
 
-func (e transportError) Error() string { return e.cause.Error() }
+func directRestore(source string) isRequest_Command {
+	return &Request_DirectRestore{DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()}}
+}
 
-func (e transportError) Unwrap() error { return e.cause }
-
-func (e failureError) Error() string {
-	return fmt.Sprintf("PageBroker %s: %s", e.code, e.message)
+func prepareDirectCheckpoint(destination string) isRequest_Command {
+	return &Request_PrepareDirectCheckpoint{
+		PrepareDirectCheckpoint: &PrepareDirectCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},
+	}
 }
 
 func filesystem(directory string) *StorageBackend {
@@ -274,6 +324,46 @@ func writeMessage(writer io.Writer, message []byte) error {
 		message = message[written:]
 	}
 	return nil
+}
+
+// Rights arrive with the first header bytes. Close every adopted descriptor on error.
+func readMessageWithFiles(connection *net.UnixConn) (message []byte, files []int, err error) {
+	defer func() {
+		if err != nil {
+			for _, fd := range files {
+				_ = unix.Close(fd)
+			}
+			files = nil
+		}
+	}()
+	header := make([]byte, messageHeaderSize)
+	control := make([]byte, unix.CmsgSpace(maxPassedFiles*4))
+	n, controlSize, flags, _, err := connection.ReadMsgUnix(header, control)
+	if err != nil {
+		return nil, nil, err
+	}
+	messages, err := unix.ParseSocketControlMessage(control[:controlSize])
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, message := range messages {
+		rights, parseErr := unix.ParseUnixRights(&message)
+		if parseErr != nil {
+			return nil, files, parseErr
+		}
+		for _, fd := range rights {
+			unix.CloseOnExec(fd)
+		}
+		files = append(files, rights...)
+	}
+	if flags&(unix.MSG_CTRUNC|unix.MSG_TRUNC) != 0 {
+		return nil, files, fmt.Errorf("truncated PageBroker process descriptor response")
+	}
+	if n == 0 {
+		return nil, files, io.ErrUnexpectedEOF
+	}
+	message, err = readMessage(io.MultiReader(bytes.NewReader(header[:n]), connection))
+	return message, files, err
 }
 
 func readMessage(reader io.Reader) ([]byte, error) {
