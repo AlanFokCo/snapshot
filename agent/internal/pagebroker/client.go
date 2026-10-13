@@ -33,8 +33,8 @@ const (
 
 var commitRetryLimit = 30 * time.Second
 
-// Client speaks the local PageBroker protocol. Artifact-addressed operations
-// require backend support; existing filesystem callers can migrate separately.
+// Client speaks the local PageBroker protocol. Filesystem operations run against
+// the current broker; artifact-addressed operations require a storage backend.
 type Client struct {
 	ControlSocketPath string
 }
@@ -179,7 +179,7 @@ func (c Client) request(ctx context.Context, transactionID string, command isReq
 }
 
 func (c Client) requestResponse(ctx context.Context, request *Request, files ...*os.File) (*Response, *os.File, error) {
-	// Check framing before dialing. GPU exchanges still send file descriptors through exchange.
+	// Check framing before dialing. GPU exchanges bypass this path; writeRequest checks their size.
 	if proto.Size(request) > maxMessageSize {
 		return nil, nil, errMessageTooLarge
 	}
@@ -252,8 +252,8 @@ func exchangeResponse(ctx context.Context, connection *net.UnixConn, request *Re
 	if failure := response.GetFailure(); failure != nil {
 		// Legacy handlers return filesystem exception text, which can include long
 		// paths and is not guaranteed valid UTF-8. Only the storage-extension codes
-		// promise the smaller, UTF-8 wire bound; legacy and unknown codes retain the
-		// existing frame-size limit and are not UTF-8 checked.
+		// promise the smaller, UTF-8 wire bound; legacy and unknown codes are bounded
+		// by the frame size alone and are not UTF-8 checked.
 		message := failure.GetMessage()
 		if isStorageFailure(failure.GetCode()) && (len(message) > maxFailureMessageSize || !utf8.ValidString(message)) {
 			message = "message omitted: exceeds the storage failure bound or is not valid UTF-8"

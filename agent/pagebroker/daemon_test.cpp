@@ -1073,7 +1073,7 @@ TEST_F(BrokerTest, RejectsArtifactCheckpointBeforeStagingOrLegacyFallback)
     EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "checkpoint" / request.transaction_id()));
     EXPECT_FALSE(fs::exists(root_ / "storage" / "output"));
 
-    // Rejection did not allocate a transaction. A valid legacy call still works.
+    // Rejection did not allocate a transaction; a legacy call on the same ID succeeds.
     operation->clear_target();
     Configure(operation->mutable_destination(), operation->mutable_io_engine(), root_ / "storage" / "output");
     EXPECT_TRUE(broker().HandleRequest(request).has_staged_checkpoint_directory());

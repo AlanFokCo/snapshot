@@ -72,8 +72,8 @@ IsSafePathComponent(const std::string& value)
 const StorageBackend&
 ValidateStagedRestore(const StagedRestoreRequest& request)
 {
-  // Do not silently fall back to a filesystem path when a caller asks for a
-  // store-bound artifact. Backend support lands separately from this contract.
+  // No backend serves store-bound artifacts, and a caller that asks for one must
+  // never be served a filesystem path instead.
   if (request.has_artifact()) {
     if (request.has_source())
       throw std::invalid_argument("artifact cannot be combined with legacy source");

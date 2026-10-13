@@ -109,11 +109,13 @@ message PrepareDirectCheckpointRequest
 }
 // Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
 // Repeating Commit returns the same retained result, including any PublishedArtifact.
-// Commit for an aborted, expired, or unknown transaction returns TRANSACTION_NOT_FOUND.
+// Commit for a transaction PageBroker still remembers but whose deadline has passed returns
+// TRANSACTION_EXPIRED. Commit for an aborted, reaped, or unknown transaction returns TRANSACTION_NOT_FOUND.
 message CommitRequest {}
 // Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
-// one hour. Repeating Abort for a retained aborted transaction returns AbortComplete. Abort for a committed or
-// expired, or unknown transaction returns TRANSACTION_NOT_FOUND.
+// one hour. Repeating Abort for a retained aborted transaction returns AbortComplete. Abort for a transaction
+// PageBroker still remembers but whose deadline has passed returns TRANSACTION_EXPIRED. Abort for a committed,
+// reaped, or unknown transaction returns TRANSACTION_NOT_FOUND.
 // For an Abort authenticated with the original broker pidfd, TRANSACTION_NOT_FOUND
 // also confirms that this broker has no running GPU work for the transaction.
 message AbortRequest {}
@@ -145,7 +147,7 @@ message Request
     CheckpointGpuRequest checkpoint_gpu = 9;
     RestoreGpuRequest restore_gpu = 10;
     CapabilitiesRequest capabilities = 11;
-    // Storage extensions use 20+; 8-19 remain available to the separate CUDA workstream.
+    // Storage extensions use 20+; 12-19 are reserved for the CUDA workstream.
     GetArtifactMetadataRequest get_artifact_metadata = 20;
   }
 }
@@ -189,7 +191,7 @@ message Failure
     UNSPECIFIED = 0;
     // The request is invalid or unsupported. PageBroker did not change transaction state.
     INVALID_REQUEST = 1;
-    // The transaction is unknown or has reached the opposite terminal state.
+    // The transaction is unknown, was reaped after expiry, or has reached the opposite terminal state.
     TRANSACTION_NOT_FOUND = 2;
     // The transaction ID or checkpoint destination conflicts with an existing transaction or output.
     TRANSACTION_CONFLICT = 3;
@@ -209,10 +211,12 @@ message Failure
     ARTIFACT_CORRUPT = 24;     // Invalid index, unsafe paths, missing indexed data or digest mismatch.
     UNSUPPORTED_ARTIFACT = 25; // No reader for the backend or the layout version recorded in the index.
     OUTCOME_UNKNOWN = 26;     // Cannot establish publication outcome; never authorizes process replay.
-    TRANSACTION_EXPIRED = 27; // Fixed transaction deadline elapsed; no new storage operations.
+    // The fixed deadline passed while PageBroker still remembers the transaction; no new storage operations
+    // start. Unknown or reaped transactions return TRANSACTION_NOT_FOUND.
+    TRANSACTION_EXPIRED = 27;
   }
   optional Code code = 1;
-  optional string message = 2; // New storage handlers: at most 1024 UTF-8 bytes, no credentials/SDK bodies.
+  optional string message = 2; // Storage-extension codes: at most 1024 UTF-8 bytes, no credentials or SDK bodies.
 }
 // Successful storage preparation responses requested with request_broker_pidfd
 // carry exactly one broker pidfd via SCM_RIGHTS on the first frame-header bytes.

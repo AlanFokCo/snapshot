@@ -31,7 +31,7 @@ const (
 	Failure_UNSPECIFIED Failure_Code = 0
 	// The request is invalid or unsupported. PageBroker did not change transaction state.
 	Failure_INVALID_REQUEST Failure_Code = 1
-	// The transaction is unknown or has reached the opposite terminal state.
+	// The transaction is unknown, was reaped after expiry, or has reached the opposite terminal state.
 	Failure_TRANSACTION_NOT_FOUND Failure_Code = 2
 	// The transaction ID or checkpoint destination conflicts with an existing transaction or output.
 	Failure_TRANSACTION_CONFLICT Failure_Code = 3
@@ -51,7 +51,9 @@ const (
 	Failure_ARTIFACT_CORRUPT     Failure_Code = 24 // Invalid index, unsafe paths, missing indexed data or digest mismatch.
 	Failure_UNSUPPORTED_ARTIFACT Failure_Code = 25 // No reader for the backend or the layout version recorded in the index.
 	Failure_OUTCOME_UNKNOWN      Failure_Code = 26 // Cannot establish publication outcome; never authorizes process replay.
-	Failure_TRANSACTION_EXPIRED  Failure_Code = 27 // Fixed transaction deadline elapsed; no new storage operations.
+	// The fixed deadline passed while PageBroker still remembers the transaction; no new storage operations
+	// start. Unknown or reaped transactions return TRANSACTION_NOT_FOUND.
+	Failure_TRANSACTION_EXPIRED Failure_Code = 27
 )
 
 // Enum value maps for Failure_Code.
@@ -1101,7 +1103,8 @@ func (x *PrepareDirectCheckpointRequest) GetIoEngine() *IOEngine {
 
 // Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
 // Repeating Commit returns the same retained result, including any PublishedArtifact.
-// Commit for an aborted, expired, or unknown transaction returns TRANSACTION_NOT_FOUND.
+// Commit for a transaction PageBroker still remembers but whose deadline has passed returns
+// TRANSACTION_EXPIRED. Commit for an aborted, reaped, or unknown transaction returns TRANSACTION_NOT_FOUND.
 type CommitRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1139,8 +1142,9 @@ func (*CommitRequest) Descriptor() ([]byte, []int) {
 }
 
 // Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
-// one hour. Repeating Abort for a retained aborted transaction returns AbortComplete. Abort for a committed or
-// expired, or unknown transaction returns TRANSACTION_NOT_FOUND.
+// one hour. Repeating Abort for a retained aborted transaction returns AbortComplete. Abort for a transaction
+// PageBroker still remembers but whose deadline has passed returns TRANSACTION_EXPIRED. Abort for a committed,
+// reaped, or unknown transaction returns TRANSACTION_NOT_FOUND.
 // For an Abort authenticated with the original broker pidfd, TRANSACTION_NOT_FOUND
 // also confirms that this broker has no running GPU work for the transaction.
 type AbortRequest struct {
@@ -1401,7 +1405,7 @@ type Request_Capabilities struct {
 }
 
 type Request_GetArtifactMetadata struct {
-	// Storage extensions use 20+; 8-19 remain available to the separate CUDA workstream.
+	// Storage extensions use 20+; 12-19 are reserved for the CUDA workstream.
 	GetArtifactMetadata *GetArtifactMetadataRequest `protobuf:"bytes,20,opt,name=get_artifact_metadata,json=getArtifactMetadata,proto3,oneof"`
 }
 
@@ -1866,7 +1870,7 @@ func (*AbortComplete) Descriptor() ([]byte, []int) {
 type Failure struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Code          *Failure_Code          `protobuf:"varint,1,opt,name=code,proto3,enum=snapshot.pagebroker.v1.Failure_Code,oneof" json:"code,omitempty"`
-	Message       *string                `protobuf:"bytes,2,opt,name=message,proto3,oneof" json:"message,omitempty"` // New storage handlers: at most 1024 UTF-8 bytes, no credentials/SDK bodies.
+	Message       *string                `protobuf:"bytes,2,opt,name=message,proto3,oneof" json:"message,omitempty"` // Storage-extension codes: at most 1024 UTF-8 bytes, no credentials or SDK bodies.
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
