@@ -27,8 +27,31 @@ permissions:
   packages: read
 
 jobs:
+  validate:
+    name: Validate native E2E inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      # Input validation only, not authorization or image provenance. No
+      # checkout or GPU runner is needed to reject a malformed explicit tag.
+      - name: Validate Snapshot image tag
+        env:
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag || '' }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          tag = os.environ["SNAPSHOT_TAG"]
+          if tag and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", tag) is None:
+              sys.exit("Snapshot image tag must be 1-128 ASCII tag characters")
+          PY
+
   e2e:
     name: Run Snapshot e2e tests in vCluster
+    needs: validate
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 60
     env:
@@ -70,10 +93,12 @@ jobs:
       - name: Use provided Snapshot image tag
         if: ${{ (inputs.snapshot_tag || '') != '' }}
         timeout-minutes: 1
+        env:
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
         run: |
           set -euo pipefail
-          echo "SNAPSHOT_E2E_SNAPSHOT_TAG=${{ inputs.snapshot_tag }}" >> "$GITHUB_ENV"
-          echo "Using provided Snapshot image tag: ${{ inputs.snapshot_tag }}"
+          printf 'SNAPSHOT_E2E_SNAPSHOT_TAG=%s\n' "$SNAPSHOT_TAG" >> "$GITHUB_ENV"
+          printf 'Using provided Snapshot image tag: %s\n' "$SNAPSHOT_TAG"
 
       - name: Capture host kubeconfig
         id: host
@@ -110,12 +135,20 @@ jobs:
 
       - name: Run snapshot lifecycle tests
         timeout-minutes: 35
+        env:
+          SNAPSHOT_E2E_REQUIRED_TESTS: >-
+            test_successful_snapshot_captures_cpu_gpu_and_fs,
+            test_snapshot_records_the_environment_a_restore_is_checked_against,
+            test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot
         run: |
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
 
       - name: Run SnapshotJob lifecycle tests
         timeout-minutes: 20
+        env:
+          SNAPSHOT_E2E_REQUIRED_TESTS: >-
+            test_snapshotjob_captures_and_restore_recovers_state
         run: |
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests/test_snapshotjob.py -vv -s

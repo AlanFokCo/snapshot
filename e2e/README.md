@@ -36,8 +36,24 @@ escaped as `\,`.
 The GitHub workflow creates a temporary vCluster, installs the Snapshot chart
 there, runs the environment check, then runs the snapshot lifecycle tests.
 
-The workflow resolves the latest published Snapshot operator/agent image tag and
-passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
+`.github/workflows/e2e.yaml` is the manual and nightly GPU run. Leave
+`snapshot_tag` empty and it installs the images for the checked-out commit
+(`v0.0.0-g<sha8>`). The operator, agent, and pagebroker images all have to be
+published for that commit. If one is missing, the run fails.
+
+To test a build that is already published, pass its tag as `snapshot_tag`.
+The usual case is a manual `push-artifacts.yaml` dispatch on a feature branch.
+A hosted runner checks that the value is a single image tag before the GPU
+job starts, and the GPU job exports it as `SNAPSHOT_E2E_SNAPSHOT_TAG`. The
+check looks only at the shape of the tag. Matching that tag to a commit is
+left to whoever dispatched the workflow.
+
+The snapshot lifecycle step and the SnapshotJob step name their round trips
+in `SNAPSHOT_E2E_REQUIRED_TESTS`: GPU capture, the environment recorded for
+restore, GPU restore, and the SnapshotJob capture and restore. CPU Mode
+below describes that guard. A missing, deselected, or skipped required case
+fails the job. Local runs leave the variable unset, where a skip is still a
+skip.
 
 ### CPU Mode (k3d)
 
