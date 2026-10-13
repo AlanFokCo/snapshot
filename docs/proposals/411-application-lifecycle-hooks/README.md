@@ -45,9 +45,9 @@ Before capture, the application must tell Snapshot it is safe to checkpoint.
 After restore, Snapshot must tell the application it may recover connections
 and other resources before serving requests.
 
-Today, this exchange uses files on a shared control volume. HTTP and Unix
-signals let applications expose other interfaces. Contracts let users select
-an engine integration without repeating endpoints, signals, and timing settings.
+Today, this exchange uses files on a shared control volume. This proposal adds
+HTTP support. Contracts let users select an engine integration without repeating
+file names, endpoints, and timing settings.
 
 ### Goals
 
@@ -92,7 +92,7 @@ must work before release, including after restore at a new Pod IP.
 
 | Risk | Required handling |
 | --- | --- |
-| Unsafe capture signal | The application stays safe until capture; integration tests verify recovery and inference. |
+| Premature capture readiness | The application stays safe until capture; integration tests verify recovery and inference. |
 | Recreated contract name | Administrators validate compatibility or publish a new name. |
 | Lost release response | Applications handle duplicate delivery; deadline expiry can terminate an already released application. |
 | Custom probes during recovery | Workload owners configure probes to tolerate recovery. |
@@ -227,7 +227,6 @@ type RestoreRelease struct {
 type RestoreReleaseHandler struct {
 	File     *ControlFileAction   `json:"file,omitempty"`
 	HTTPPost *LifecycleHTTPAction `json:"httpPost,omitempty"`
-	Signal   *SignalAction        `json:"signal,omitempty"`
 }
 
 type ControlFileAction struct {
@@ -238,14 +237,10 @@ type LifecycleHTTPAction struct {
 	Path string `json:"path"`
 	Port int32  `json:"port"`
 }
-
-type SignalAction struct {
-	Signal string `json:"signal"`
-}
 ```
 
 When present, `quiesceProbe` requires exactly one of `file` or `httpGet`, and
-`restoreRelease` requires exactly one of `file`, `httpPost`, or `signal`.
+`restoreRelease` requires exactly one of `file` or `httpPost`.
 
 Defaults are `initialDelaySeconds: 0`, `periodSeconds: 1`,
 `timeoutSeconds: 1`, and `successThreshold: 1`. The initial delay is nonnegative;
@@ -266,7 +261,6 @@ HTTP paths must begin with `/` and contain no authority, query, or fragment.
 Ports range from 1 through 65535. Only HTTP is supported, and the agent derives
 the host from the target Pod IP. Host overrides, custom headers, and request
 bodies are not part of this API.
-Signal names are restricted to `SIGUSR1` and `SIGUSR2`.
 
 **Transport behavior**
 
@@ -276,12 +270,11 @@ Signal names are restricted to `SIGUSR1` and `SIGUSR2`.
 | HTTP probe | GET returns `200`. |
 | File release | The agent atomically publishes the marker in the destination control directory. |
 | HTTP release | POST with an empty body returns `200` or `204`, acknowledging acceptance. Recovery may continue asynchronously. |
-| Signal release | The agent sends the signal to the verified restored process-tree root, not the placeholder process. Delivery does not acknowledge handler completion. |
 
 GET and POST response bodies are ignored; no attempt ID is sent. All unsuccessful
 HTTP release requests, including connection failures, are retried until the
-restore deadline. Signal handlers must be installed before capture. Shared HTTP
-endpoints receive no container identifier and must coordinate the required releases.
+restore deadline. Shared HTTP endpoints receive no container identifier and must
+coordinate the required releases.
 
 Example HTTP contract (illustrative endpoints):
 
@@ -301,18 +294,6 @@ spec:
       path: /snapshot/restored
       port: 9001
     timeoutSeconds: 2
-```
-
-File readiness can also be combined with signal release:
-
-```yaml
-spec:
-  quiesceProbe:
-    file:
-      name: ready-for-snapshot
-  restoreRelease:
-    signal:
-      signal: SIGUSR1
 ```
 
 #### Checkpoint metadata
@@ -342,7 +323,7 @@ flowchart TD
 
 The agent saves the resolved definition for capture retries and restarts. The
 application must clear stale readiness markers before initialization and remain
-safe once its capture signal succeeds.
+safe after reporting capture readiness.
 
 **Restore and release**
 
@@ -411,8 +392,7 @@ HTTP permissions must account for the whole Pod. Deployments must restrict
 access to the unencrypted control listener.
 
 Confine file operations to the container's control directory; reject symlinks
-and path traversal. Signals target the verified restored process; callers cannot supply
-a host PID. Protect bindings and attempt records as agent-owned metadata.
+and path traversal. Protect bindings and attempt records as agent-owned metadata.
 Logs and Events must not include response bodies or application memory.
 
 **Open question:** should HTTP authentication be supported initially, and how
@@ -470,10 +450,9 @@ Log routine unsuccessful probe polls only at debug level.
   repair after recorded success, and no repeated CRIU restore. Cover concurrent
   agents, omitted release, and legacy marker recovery.
 - **Transports:** test status codes, ignored bodies, retries, redirect/proxy and
-  host-network rejection, file confinement, stale markers, and signal targets.
-  Verify file/signal destination isolation and shared-HTTP coordination.
-- **Integrations:** validate file, HTTP, and file-readiness/signal-release with
-  inference after restore. Cover new Pod IPs, release before serving, asynchronous
+  host-network rejection, file confinement, and stale markers. Verify file
+  destination isolation and shared-HTTP coordination.
+- **Integrations:** validate file and HTTP with inference after restore. Cover new Pod IPs, release before serving, asynchronous
   recovery, and custom probes. Advertise only validated combinations and document
   supported engine versions, topologies, and required application settings.
 
