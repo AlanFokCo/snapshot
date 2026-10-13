@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -239,6 +240,37 @@ func installFakeNSenter(t *testing.T, body string) {
 		t.Fatalf("write fake nsenter: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestNsenterNvidiaSMI(t *testing.T) {
+	installFakeNSenter(t, `
+test "$#" = 6
+test "$1" = "--mount=/host/proc/42/ns/mnt"
+test "$2" = "--pid=/host/proc/42/ns/pid"
+test "$3" = "--"
+test "$4" = "nvidia-smi"
+test "$5" = "-i"
+test "$6" = "0"
+printf 'raw output\n'
+`)
+
+	got, err := nsenterNvidiaSMI(context.Background(), "/host/proc/", 42, "-i", "0")
+	if err != nil {
+		t.Fatalf("nsenterNvidiaSMI: %v", err)
+	}
+	if string(got) != "raw output\n" {
+		t.Fatalf("nsenterNvidiaSMI() = %q, want the command's stdout unchanged", got)
+	}
+}
+
+func TestNsenterNvidiaSMIReturnsCommandFailure(t *testing.T) {
+	installFakeNSenter(t, "exit 17\n")
+
+	_, err := nsenterNvidiaSMI(context.Background(), "/host/proc", 42, "-L")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 17 || !strings.Contains(err.Error(), "pid 42") {
+		t.Fatalf("nsenterNvidiaSMI error = %v, want exit status 17 wrapped with pid 42", err)
+	}
 }
 
 func TestDiscoverVisibleGPUs(t *testing.T) {
