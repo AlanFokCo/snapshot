@@ -90,8 +90,6 @@ func TestCPUFeaturesCheck(t *testing.T) {
 			want:   []Mismatch{{Check: CheckCPUFeatures, Source: "avx512bw,avx512f,avx512vl", Target: "missing"}},
 		},
 		{
-			// A VM source and a bare-metal target differ in hypervisor alone,
-			// and nothing a process runs depends on it.
 			name:   "flags that name no instruction never refuse",
 			source: features("avx2", "hypervisor", "constant_tsc"),
 			target: features("avx2"),
@@ -115,8 +113,7 @@ func TestCPUFeaturesCheck(t *testing.T) {
 		})
 	}
 
-	// The agent reads its own CPU at startup, so the refusal does not have to
-	// wait for the placeholder container.
+	// The agent knows its own CPU before the placeholder container exists.
 	if got := Compare(GateInspect, features("avx512f"), features("sse2")); len(got) != 0 {
 		t.Errorf("the second gate repeated the CPU features check: %+v", got)
 	}

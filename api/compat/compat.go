@@ -43,8 +43,7 @@ type Check string
 type Environment struct {
 	KernelVersion string
 	CPUArch       string
-	// Compared through InstructionSetFeatures, so flags that name no
-	// instruction can never refuse a restore.
+	// /proc/cpuinfo flags. Only the instruction-set ones are compared.
 	CPUFeatures []string
 
 	Image       string

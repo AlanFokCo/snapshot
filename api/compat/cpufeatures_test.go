@@ -25,8 +25,7 @@ func TestInstructionSetFeatures(t *testing.T) {
 			want:  []string{"avx", "sse2"},
 		},
 		{
-			// The kernel has always printed SSE3 as pni, so a list that
-			// spelled it sse3 would never match a real CPU.
+			// /proc/cpuinfo spells SSE3 as pni.
 			name:  "SSE3 under its cpuinfo name",
 			flags: []string{"pni", "sse3"},
 			want:  []string{"pni"},
