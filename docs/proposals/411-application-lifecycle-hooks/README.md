@@ -47,7 +47,7 @@ and other resources before serving requests.
 
 Today, this exchange uses files on a shared control volume. This proposal adds
 HTTP support. Contracts let users select an engine integration without repeating
-file names, endpoints, and timing settings.
+file paths, endpoints, and timing settings.
 
 ### Goals
 
@@ -230,7 +230,7 @@ type RestoreReleaseHandler struct {
 }
 
 type ControlFileAction struct {
-	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 type LifecycleHTTPAction struct {
@@ -251,11 +251,11 @@ There is no `failureThreshold`: a failed check resets the success count and keep
 waiting without restarting the container. Reset the count when the source container
 restarts or is replaced; measure initial delay from that container's start time.
 
-File names must be single path components within the container's
-`SNAPSHOT_CONTROL_DIR`. Absolute paths, separators, `.` and `..` are invalid.
-The probe and release cannot use the same name. Internal names such as
-`cuda-checkpoint-job` are reserved; `ready-for-snapshot` and `restore-complete`
-remain valid for their respective actions.
+File paths must be absolute within the selected container's filesystem; they
+do not depend on `SNAPSHOT_CONTROL_DIR`. Reject `.` and `..` path components.
+Probe and release paths must differ. Snapshot's internal control files remain
+reserved; the default contract's readiness and release markers are allowed.
+The application must provide the release file's parent directory.
 
 HTTP paths must begin with `/` and contain no authority, query, or fragment.
 Ports range from 1 through 65535. Only HTTP is supported, and the agent derives
@@ -268,7 +268,7 @@ bodies are not part of this API.
 | --- | --- |
 | File probe | The marker exists as a regular file. |
 | HTTP probe | GET returns `200`. |
-| File release | The agent atomically publishes the marker in the destination control directory. |
+| File release | The agent atomically publishes the marker at the configured path in the restored container. |
 | HTTP release | POST with an empty body returns `200` or `204`, acknowledging acceptance. Recovery may continue asynchronously. |
 
 GET and POST response bodies are ignored; no attempt ID is sent. All unsuccessful
@@ -391,8 +391,10 @@ Reject host-network Pods for HTTP actions. Containers share the Pod network, so
 HTTP permissions must account for the whole Pod. Deployments must restrict
 access to the unencrypted control listener.
 
-Confine file operations to the container's control directory; reject symlinks
-and path traversal. Protect bindings and attempt records as agent-owned metadata.
+Resolve file paths inside the selected container's filesystem, never the host
+root; reject symlinks and path traversal. Shared mounts can expose writes beyond
+the container, so authorization must account for them. Protect bindings and
+attempt records as agent-owned metadata.
 Logs and Events must not include response bodies or application memory.
 
 **Open question:** should HTTP authentication be supported initially, and how
@@ -400,7 +402,7 @@ should capture and restore obtain credentials? The API has no credential fields.
 
 ### Configuration
 
-Snapshot installs this ClusterApplicationContract with the release:
+Snapshot installs this contract using the existing control-volume paths:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -410,10 +412,10 @@ metadata:
 spec:
   quiesceProbe:
     file:
-      name: ready-for-snapshot
+      path: /snapshot-control/ready-for-snapshot
   restoreRelease:
     file:
-      name: restore-complete
+      path: /snapshot-control/restore-complete
 ```
 
 This Helm setting selects the cluster default for PodSnapshot and SnapshotJob:
@@ -450,8 +452,9 @@ Log routine unsuccessful probe polls only at debug level.
   repair after recorded success, and no repeated CRIU restore. Cover concurrent
   agents, omitted release, and legacy marker recovery.
 - **Transports:** test status codes, ignored bodies, retries, redirect/proxy and
-  host-network rejection, file confinement, and stale markers. Verify file
-  destination isolation and shared-HTTP coordination.
+  host-network rejection, absolute file paths outside the control directory,
+  symlink/traversal rejection, and stale markers. Verify target-container path
+  resolution, shared-mount effects, and shared-HTTP coordination.
 - **Integrations:** validate file and HTTP with inference after restore. Cover new Pod IPs, release before serving, asynchronous
   recovery, and custom probes. Advertise only validated combinations and document
   supported engine versions, topologies, and required application settings.
