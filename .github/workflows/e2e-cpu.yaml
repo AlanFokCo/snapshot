@@ -155,11 +155,15 @@ jobs:
         run: |
           set -euo pipefail
           start=$(date +%s)
+          # Assigned, not inlined into the argument: a command substitution
+          # that fails inside a simple command does not trip `set -e`, so an
+          # inline call would drop the cache flags and still build -- the same
+          # silent cache loss this whole change exists to fix.
+          cache_flags="$(hack/ci-cache-flags.sh read operator "${CACHE_BRANCH}")"
           make docker-build-operator \
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
-            DOCKER_BUILD_ARGS="--push \
-              $(hack/ci-cache-flags.sh read operator "${CACHE_BRANCH}")"
+            DOCKER_BUILD_ARGS="--push ${cache_flags}"
           hack/ci-phase.sh "Build operator image" "${start}" \
             "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}"
 
@@ -168,11 +172,11 @@ jobs:
         run: |
           set -euo pipefail
           start=$(date +%s)
+          cache_flags="$(hack/ci-cache-flags.sh read agent "${CACHE_BRANCH}")"
           make docker-build-agent \
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
-            DOCKER_BUILD_ARGS="--push \
-              $(hack/ci-cache-flags.sh read agent "${CACHE_BRANCH}")"
+            DOCKER_BUILD_ARGS="--push ${cache_flags}"
           hack/ci-phase.sh "Build agent image" "${start}" \
             "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}"
 
@@ -188,9 +192,10 @@ jobs:
           # The bundle alone, from its own stage. Reading it out of the agent
           # image would mean pulling that image into the daemon, which is the
           # cost this job no longer pays.
+          cache_flags="$(hack/ci-cache-flags.sh read agent "${CACHE_BRANCH}")"
           make docker-export-agent-bundle \
             BUNDLE_DEST="${RUNNER_TEMP}/agent-bundle" \
-            DOCKER_BUILD_ARGS="$(hack/ci-cache-flags.sh read agent "${CACHE_BRANCH}")"
+            DOCKER_BUILD_ARGS="${cache_flags}"
           hack/verify-bundle-glibc.sh "${RUNNER_TEMP}/agent-bundle"
 
       - name: Build PageBroker image
@@ -198,11 +203,11 @@ jobs:
         run: |
           set -euo pipefail
           start=$(date +%s)
+          cache_flags="$(hack/ci-cache-flags.sh read pagebroker "${CACHE_BRANCH}")"
           make docker-build-pagebroker \
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
-            DOCKER_BUILD_ARGS="--push \
-              $(hack/ci-cache-flags.sh read pagebroker "${CACHE_BRANCH}")"
+            DOCKER_BUILD_ARGS="--push ${cache_flags}"
           hack/ci-phase.sh "Build PageBroker image" "${start}" \
             "${IMAGE_REGISTRY}/pagebroker:${IMAGE_TAG}"
 

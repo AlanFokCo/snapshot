@@ -67,6 +67,9 @@ commands:
   registry-prefix  print the registry prefix to tag and push images with
   cluster-up       create the cluster and write a kubeconfig
   cluster-down     delete the cluster and the registry
+  cluster-down-keep-registry
+                   delete the cluster but leave the registry, so a later run
+                   with SNAPSHOT_E2E_SKIP_BUILD can still pull its images
   helm-set         print the chart values this cluster needs, one KEY=VALUE per
                    line, for the installer's SNAPSHOT_E2E_HELM_SET
 
@@ -109,6 +112,16 @@ require_tools() {
 registry_up() {
   require_tools docker k3d
   if registry_exists; then
+    # Reuse means reusing its port too. k3d names the container after the
+    # registry, so a changed SNAPSHOT_E2E_K3D_REGISTRY_PORT still matches by
+    # name, and the push would then go to a port nothing is listening on.
+    local bound
+    bound="$(registry_bound_port)"
+    if [[ -n "${bound}" && "${bound}" != "${REGISTRY_PORT}" ]]; then
+      echo "registry ${REGISTRY_HOST} already exists on port ${bound}, not ${REGISTRY_PORT}." >&2
+      echo "Delete it with 'k3d registry delete ${REGISTRY_HOST}', or unset SNAPSHOT_E2E_K3D_REGISTRY_PORT." >&2
+      exit 1
+    fi
     log "reusing registry ${REGISTRY_HOST} on localhost:${REGISTRY_PORT}"
     return
   fi
@@ -124,6 +137,15 @@ registry_up() {
 
 registry_exists() {
   k3d registry list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${REGISTRY_HOST}"
+}
+
+# The host port the existing registry publishes for container port 5000, or
+# empty if it publishes none. Read from Docker rather than `k3d registry list`,
+# whose column layout is not a stable interface.
+registry_bound_port() {
+  docker inspect "${REGISTRY_HOST}" \
+    --format '{{(index (index .NetworkSettings.Ports "5000/tcp") 0).HostPort}}' \
+    2>/dev/null || true
 }
 
 registry_down() {
@@ -290,6 +312,10 @@ cluster_down() {
   k3d cluster delete "${CLUSTER_NAME}" || true
   # After the cluster: deleting the registry first would leave the node with a
   # mirror pointing at nothing, and k3d logs that as an error on teardown.
+  if [[ "${1:-}" == "keep-registry" ]]; then
+    log "leaving registry ${REGISTRY_HOST} up"
+    return
+  fi
   registry_down
 }
 
@@ -298,6 +324,7 @@ registry-up) registry_up ;;
 registry-prefix) echo "localhost:${REGISTRY_PORT}" ;;
 cluster-up) cluster_up ;;
 cluster-down) cluster_down ;;
+cluster-down-keep-registry) cluster_down keep-registry ;;
 helm-set) print_helm_set ;;
 *) usage ;;
 esac

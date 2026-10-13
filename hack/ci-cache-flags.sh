@@ -16,8 +16,10 @@
 #          when its own tag is missing or new, and one for the pre-keying tag
 #          behind both. Pull requests never write: a cache a pull request can
 #          write is a cache a fork can poison.
-#   write  --cache-from and --cache-to for the branch. Only main and release/*
-#          reach this, from push-artifacts.yaml.
+#   write  --cache-from and --cache-to for the branch. Only pushes to main and
+#          release/* reach this, from push-artifacts.yaml; a release runs the
+#          same workflow in read mode, because a tag never recurs and so a
+#          cache published under one is a cache nothing ever reads.
 #
 # Reads CACHE_REF_PREFIX, and CACHE_TAG_SUFFIX if set — any unused value there
 # points every flag at a tag that does not exist, which is how a cold build is
@@ -31,6 +33,17 @@ BRANCH=${3:?usage: ci-cache-flags.sh <read|write> <image> <branch>}
 
 : "${CACHE_REF_PREFIX:?CACHE_REF_PREFIX must name the cache repository}"
 SUFFIX=${CACHE_TAG_SUFFIX:-}
+
+# Validated here rather than trusted, because it arrives from a
+# workflow_dispatch input and lands in a string the Makefile word-splits as
+# $(DOCKER_BUILD_ARGS). A space or a quote would not merely name a tag that
+# cannot exist -- it would add build flags.
+case "$SUFFIX" in
+*[!A-Za-z0-9._-]*)
+    echo "CACHE_TAG_SUFFIX may only contain letters, digits, '.', '_' or '-': '$SUFFIX'" >&2
+    exit 2
+    ;;
+esac
 
 # Same shape as the image tag slug in push-artifacts.yaml: lowercase
 # alphanumerics and single hyphens. A tag cannot hold the slash in release/0.1.
@@ -52,13 +65,19 @@ short_digest() {
 branch_slug=$(slug "$BRANCH")
 branch_slug=${branch_slug:-branch}
 
-# A tag is capped at 128 characters and nothing stops a branch name being
-# longer than that, which would produce a reference buildx rejects -- failing
-# the release build rather than merely missing the cache. Truncate, and keep a
-# digest of the full name so two long branches sharing a prefix do not share a
-# cache.
-if [ "${#branch_slug}" -gt 32 ]; then
-    branch_slug="$(printf '%s' "$branch_slug" | cut -c1-24)-$(short_digest "$BRANCH")"
+# The slug is lossy -- release/a_b and release/a-b both reduce to release-a-b --
+# so every branch but main carries a digest of its real name, and two branches
+# cannot land on one cache. main is exempt because its tag is the one humans
+# read, and nothing else can collide with a name that short.
+#
+# Truncated as well as suffixed: a tag is capped at 128 characters and nothing
+# caps a branch name, and an over-length reference fails the build outright
+# rather than merely missing the cache.
+if [ "$branch_slug" != main ]; then
+    if [ "${#branch_slug}" -gt 24 ]; then
+        branch_slug=$(printf '%s' "$branch_slug" | cut -c1-24)
+    fi
+    branch_slug="${branch_slug}-$(short_digest "$BRANCH")"
 fi
 
 ref="${CACHE_REF_PREFIX}:${IMAGE}-${branch_slug}${SUFFIX}"

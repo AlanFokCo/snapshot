@@ -69,12 +69,23 @@ require_push_capable_builder() {
     docker buildx create --name "${builder}" --driver docker-container \
       --driver-opt network=host >/dev/null
   fi
-  docker buildx use "${builder}"
+  # Selected for this process, not with `buildx use`, which rewrites the
+  # machine's default builder and outlives the script -- leaving every
+  # unrelated `docker build` on the container driver afterwards.
+  export BUILDX_BUILDER="${builder}"
 }
 
 cleanup() {
   if [[ "${KEEP_CLUSTER}" == "true" ]]; then
     log "leaving cluster ${SNAPSHOT_E2E_K3D_CLUSTER} up (KUBECONFIG=${KUBECONFIG})"
+    return
+  fi
+  if [[ "${SKIP_BUILD}" == "true" ]]; then
+    # The images came from an earlier run, so the registry is not this run's to
+    # delete: doing so would destroy what the next skip-build run needs and
+    # leave it failing the preflight below.
+    log "leaving registry up: this run borrowed its images"
+    hack/k3d-cpu-e2e.sh cluster-down-keep-registry
     return
   fi
   hack/k3d-cpu-e2e.sh cluster-down
