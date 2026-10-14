@@ -52,7 +52,8 @@ commit-level history for each release is on its
   missing flags (`cpu-features: source avx512f, target missing`), rather than
   restoring a process that dies with `SIGILL`. Restore semantics change; a
   checkpoint captured before the upgrade recorded no CPU flags and is not
-  checked.
+  checked, and neither is a restore onto a node whose agent could not read its
+  CPU flags at startup.
 - The agent drives checkpoints from a workqueue rather than per-checkpoint
   `coordination.k8s.io` Leases, so the `LeaseCancelled` failure reason no longer
   occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one

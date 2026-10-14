@@ -168,7 +168,9 @@ custom image still has to meet these:
   those instructions it dies with `SIGILL`. The agent records the instruction
   sets the source node offers and refuses a restore onto a node missing any of
   them, naming the missing flags (`cpu-features: source avx512f, target
-  missing`). A target that offers more is fine.
+  missing`). A target that offers more is fine. The check needs both lists, so
+  a checkpoint taken before the agent recorded them, or a restore onto a node
+  whose agent could not read its own, is admitted unchecked.
 - **All file handles must be reopenable.** Disable caches that leave handles CRIU
   cannot reopen after restore — for example `HF_HUB_DISABLE_XET=1`, and loading
   models from a local cache with `HF_HUB_OFFLINE=1`.
