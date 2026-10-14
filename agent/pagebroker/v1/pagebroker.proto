@@ -75,12 +75,15 @@ message PublishedArtifact
 
 message StagedRestoreRequest
 {
-  // Legacy filesystem selector; mutually exclusive with artifact.
-  StorageBackend source = 1;
+  // Exactly one of source or artifact is required.
+  oneof selector
+  {
+    StorageBackend source = 1;       // Legacy filesystem selector.
+    PublishedArtifact artifact = 3;  // Exact committed source; never substitute another publication.
+  }
   // Required for legacy source. Optional with artifact: absence uses the configured
   // engine; an explicit engine must support the bound store. It cannot select a store.
   IOEngine io_engine = 2;
-  PublishedArtifact artifact = 3;  // Exact committed source; never substitute another publication.
 }
 // Keeps the source open for direct reads. Does not create CPU staging files.
 message DirectRestoreRequest
@@ -90,24 +93,30 @@ message DirectRestoreRequest
 }
 message PrepareStagedCheckpointRequest
 {
-  // Legacy filesystem selector; mutually exclusive with target.
-  StorageBackend destination = 1;
+  // Exactly one of destination or target is required.
+  oneof selector
+  {
+    StorageBackend destination = 1;  // Legacy filesystem selector.
+    ArtifactTarget target = 3;       // Validate the configured store and destination before capture.
+  }
   // Required for legacy destination; optional with target (configured engine by default).
   IOEngine io_engine = 2;
-  ArtifactTarget target = 3;  // Validate the configured store and destination before capture.
 }
 // Fetch verified manifest.yaml for one publication into private shared staging.
 // Snapshot interprets the manifest. This does not verify all checkpoint payloads.
 message GetArtifactMetadataRequest
 {
   // Exactly one of artifact or target is required.
-  // Exact committed publication, as persisted after checkpoint Commit.
-  PublishedArtifact artifact = 1;
-  // Identity lookup for a publication whose descriptor was never received, for example
-  // after a lost Commit reply or an agent restart. Resolves the single publication for
-  // that store, artifact UID and container, or fails with ARTIFACT_NOT_FOUND. Reads only;
-  // it never creates, completes or substitutes a publication.
-  ArtifactTarget target = 2;
+  oneof selector
+  {
+    // Exact committed publication, as persisted after checkpoint Commit.
+    PublishedArtifact artifact = 1;
+    // Identity lookup for a publication whose descriptor was never received, for example
+    // after a lost Commit reply or an agent restart. Resolves the single publication for
+    // that store, artifact UID and container, or fails with ARTIFACT_NOT_FOUND. Reads only;
+    // it never creates, completes or substitutes a publication.
+    ArtifactTarget target = 2;
+  }
 }
 message PrepareDirectCheckpointRequest
 {

@@ -72,38 +72,42 @@ IsSafePathComponent(const std::string& value)
 const StorageBackend&
 ValidateStagedRestore(const StagedRestoreRequest& request)
 {
-  // No backend serves store-bound artifacts, and a caller that asks for one must
-  // never be served a filesystem path instead.
-  if (request.has_artifact()) {
-    if (request.has_source())
-      throw std::invalid_argument("artifact cannot be combined with legacy source");
-    throw std::invalid_argument("artifact-addressed restore is not implemented");
+  switch (request.selector_case()) {
+    case StagedRestoreRequest::kSource:
+      if (request.source().kind_case() == StorageBackend::KIND_NOT_SET)
+        throw std::invalid_argument("restore source is required");
+      return request.source();
+    case StagedRestoreRequest::kArtifact:
+      // No backend serves store-bound artifacts yet.
+      throw std::invalid_argument("artifact-addressed restore is not implemented");
+    case StagedRestoreRequest::SELECTOR_NOT_SET:
+    default:
+      throw std::invalid_argument("restore source is required");
   }
-  if (!request.has_source() || request.source().kind_case() == StorageBackend::KIND_NOT_SET)
-    throw std::invalid_argument("restore source is required");
-  return request.source();
 }
 
 void
 ValidateArtifactMetadata(const GetArtifactMetadataRequest& request)
 {
-  if (request.has_artifact() && request.has_target())
-    throw std::invalid_argument("artifact cannot be combined with target");
-  if (!request.has_artifact() && !request.has_target())
+  if (request.selector_case() == GetArtifactMetadataRequest::SELECTOR_NOT_SET)
     throw std::invalid_argument("metadata subject is required");
 }
 
 const StorageBackend&
 ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
 {
-  if (request.has_target()) {
-    if (request.has_destination())
-      throw std::invalid_argument("target cannot be combined with legacy destination");
-    throw std::invalid_argument("artifact-addressed checkpoint is not implemented");
+  switch (request.selector_case()) {
+    case PrepareStagedCheckpointRequest::kDestination:
+      if (request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
+        throw std::invalid_argument("checkpoint destination is required");
+      return request.destination();
+    case PrepareStagedCheckpointRequest::kTarget:
+      // No backend serves store-bound artifacts yet.
+      throw std::invalid_argument("artifact-addressed checkpoint is not implemented");
+    case PrepareStagedCheckpointRequest::SELECTOR_NOT_SET:
+    default:
+      throw std::invalid_argument("checkpoint destination is required");
   }
-  if (!request.has_destination() || request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
-    throw std::invalid_argument("checkpoint destination is required");
-  return request.destination();
 }
 
 FileDescriptor

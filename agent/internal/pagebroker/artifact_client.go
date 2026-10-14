@@ -20,7 +20,10 @@ func (c Client) PrepareArtifactCheckpoint(ctx context.Context, transactionID str
 		return "", err
 	}
 	response, err := c.request(ctx, transactionID, &Request_PrepareStagedCheckpoint{
-		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Target: target, IoEngine: engine},
+		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{
+			Selector: &PrepareStagedCheckpointRequest_Target{Target: target},
+			IoEngine: engine,
+		},
 	})
 	if err != nil {
 		return "", err
@@ -51,7 +54,10 @@ func (c Client) StagedArtifactRestore(ctx context.Context, transactionID string,
 		return "", err
 	}
 	response, err := c.request(ctx, transactionID, &Request_StagedRestore{
-		StagedRestore: &StagedRestoreRequest{Artifact: artifact, IoEngine: engine},
+		StagedRestore: &StagedRestoreRequest{
+			Selector: &StagedRestoreRequest_Artifact{Artifact: artifact},
+			IoEngine: engine,
+		},
 	})
 	if err != nil {
 		return "", err
@@ -66,7 +72,8 @@ func (c Client) GetArtifactMetadata(ctx context.Context, transactionID string, a
 	if err := validatePublishedArtifact(artifact); err != nil {
 		return "", err
 	}
-	result, err := c.artifactMetadata(ctx, transactionID, &GetArtifactMetadataRequest{Artifact: artifact})
+	result, err := c.artifactMetadata(
+		ctx, transactionID, &GetArtifactMetadataRequest{Selector: &GetArtifactMetadataRequest_Artifact{Artifact: artifact}})
 	if err != nil {
 		return "", err
 	}
@@ -84,7 +91,8 @@ func (c Client) LookupArtifactMetadata(ctx context.Context, transactionID string
 	if err := validateArtifactTarget(target); err != nil {
 		return nil, "", err
 	}
-	result, err := c.artifactMetadata(ctx, transactionID, &GetArtifactMetadataRequest{Target: target})
+	result, err := c.artifactMetadata(
+		ctx, transactionID, &GetArtifactMetadataRequest{Selector: &GetArtifactMetadataRequest_Target{Target: target}})
 	if err != nil {
 		return nil, "", err
 	}

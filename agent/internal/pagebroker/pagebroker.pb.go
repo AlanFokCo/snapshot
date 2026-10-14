@@ -827,12 +827,16 @@ func (x *PublishedArtifact) GetArtifactHandle() string {
 
 type StagedRestoreRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Legacy filesystem selector; mutually exclusive with artifact.
-	Source *StorageBackend `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	// Exactly one of source or artifact is required.
+	//
+	// Types that are valid to be assigned to Selector:
+	//
+	//	*StagedRestoreRequest_Source
+	//	*StagedRestoreRequest_Artifact
+	Selector isStagedRestoreRequest_Selector `protobuf_oneof:"selector"`
 	// Required for legacy source. Optional with artifact: absence uses the configured
 	// engine; an explicit engine must support the bound store. It cannot select a store.
-	IoEngine      *IOEngine          `protobuf:"bytes,2,opt,name=io_engine,json=ioEngine,proto3" json:"io_engine,omitempty"`
-	Artifact      *PublishedArtifact `protobuf:"bytes,3,opt,name=artifact,proto3" json:"artifact,omitempty"` // Exact committed source; never substitute another publication.
+	IoEngine      *IOEngine `protobuf:"bytes,2,opt,name=io_engine,json=ioEngine,proto3" json:"io_engine,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -867,9 +871,27 @@ func (*StagedRestoreRequest) Descriptor() ([]byte, []int) {
 	return file_v1_pagebroker_proto_rawDescGZIP(), []int{13}
 }
 
+func (x *StagedRestoreRequest) GetSelector() isStagedRestoreRequest_Selector {
+	if x != nil {
+		return x.Selector
+	}
+	return nil
+}
+
 func (x *StagedRestoreRequest) GetSource() *StorageBackend {
 	if x != nil {
-		return x.Source
+		if x, ok := x.Selector.(*StagedRestoreRequest_Source); ok {
+			return x.Source
+		}
+	}
+	return nil
+}
+
+func (x *StagedRestoreRequest) GetArtifact() *PublishedArtifact {
+	if x != nil {
+		if x, ok := x.Selector.(*StagedRestoreRequest_Artifact); ok {
+			return x.Artifact
+		}
 	}
 	return nil
 }
@@ -881,12 +903,21 @@ func (x *StagedRestoreRequest) GetIoEngine() *IOEngine {
 	return nil
 }
 
-func (x *StagedRestoreRequest) GetArtifact() *PublishedArtifact {
-	if x != nil {
-		return x.Artifact
-	}
-	return nil
+type isStagedRestoreRequest_Selector interface {
+	isStagedRestoreRequest_Selector()
 }
+
+type StagedRestoreRequest_Source struct {
+	Source *StorageBackend `protobuf:"bytes,1,opt,name=source,proto3,oneof"` // Legacy filesystem selector.
+}
+
+type StagedRestoreRequest_Artifact struct {
+	Artifact *PublishedArtifact `protobuf:"bytes,3,opt,name=artifact,proto3,oneof"` // Exact committed source; never substitute another publication.
+}
+
+func (*StagedRestoreRequest_Source) isStagedRestoreRequest_Selector() {}
+
+func (*StagedRestoreRequest_Artifact) isStagedRestoreRequest_Selector() {}
 
 // Keeps the source open for direct reads. Does not create CPU staging files.
 type DirectRestoreRequest struct {
@@ -943,11 +974,15 @@ func (x *DirectRestoreRequest) GetIoEngine() *IOEngine {
 
 type PrepareStagedCheckpointRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Legacy filesystem selector; mutually exclusive with target.
-	Destination *StorageBackend `protobuf:"bytes,1,opt,name=destination,proto3" json:"destination,omitempty"`
+	// Exactly one of destination or target is required.
+	//
+	// Types that are valid to be assigned to Selector:
+	//
+	//	*PrepareStagedCheckpointRequest_Destination
+	//	*PrepareStagedCheckpointRequest_Target
+	Selector isPrepareStagedCheckpointRequest_Selector `protobuf_oneof:"selector"`
 	// Required for legacy destination; optional with target (configured engine by default).
-	IoEngine      *IOEngine       `protobuf:"bytes,2,opt,name=io_engine,json=ioEngine,proto3" json:"io_engine,omitempty"`
-	Target        *ArtifactTarget `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"` // Validate the configured store and destination before capture.
+	IoEngine      *IOEngine `protobuf:"bytes,2,opt,name=io_engine,json=ioEngine,proto3" json:"io_engine,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -982,9 +1017,27 @@ func (*PrepareStagedCheckpointRequest) Descriptor() ([]byte, []int) {
 	return file_v1_pagebroker_proto_rawDescGZIP(), []int{15}
 }
 
+func (x *PrepareStagedCheckpointRequest) GetSelector() isPrepareStagedCheckpointRequest_Selector {
+	if x != nil {
+		return x.Selector
+	}
+	return nil
+}
+
 func (x *PrepareStagedCheckpointRequest) GetDestination() *StorageBackend {
 	if x != nil {
-		return x.Destination
+		if x, ok := x.Selector.(*PrepareStagedCheckpointRequest_Destination); ok {
+			return x.Destination
+		}
+	}
+	return nil
+}
+
+func (x *PrepareStagedCheckpointRequest) GetTarget() *ArtifactTarget {
+	if x != nil {
+		if x, ok := x.Selector.(*PrepareStagedCheckpointRequest_Target); ok {
+			return x.Target
+		}
 	}
 	return nil
 }
@@ -996,25 +1049,33 @@ func (x *PrepareStagedCheckpointRequest) GetIoEngine() *IOEngine {
 	return nil
 }
 
-func (x *PrepareStagedCheckpointRequest) GetTarget() *ArtifactTarget {
-	if x != nil {
-		return x.Target
-	}
-	return nil
+type isPrepareStagedCheckpointRequest_Selector interface {
+	isPrepareStagedCheckpointRequest_Selector()
 }
+
+type PrepareStagedCheckpointRequest_Destination struct {
+	Destination *StorageBackend `protobuf:"bytes,1,opt,name=destination,proto3,oneof"` // Legacy filesystem selector.
+}
+
+type PrepareStagedCheckpointRequest_Target struct {
+	Target *ArtifactTarget `protobuf:"bytes,3,opt,name=target,proto3,oneof"` // Validate the configured store and destination before capture.
+}
+
+func (*PrepareStagedCheckpointRequest_Destination) isPrepareStagedCheckpointRequest_Selector() {}
+
+func (*PrepareStagedCheckpointRequest_Target) isPrepareStagedCheckpointRequest_Selector() {}
 
 // Fetch verified manifest.yaml for one publication into private shared staging.
 // Snapshot interprets the manifest. This does not verify all checkpoint payloads.
 type GetArtifactMetadataRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Exactly one of artifact or target is required.
-	// Exact committed publication, as persisted after checkpoint Commit.
-	Artifact *PublishedArtifact `protobuf:"bytes,1,opt,name=artifact,proto3" json:"artifact,omitempty"`
-	// Identity lookup for a publication whose descriptor was never received, for example
-	// after a lost Commit reply or an agent restart. Resolves the single publication for
-	// that store, artifact UID and container, or fails with ARTIFACT_NOT_FOUND. Reads only;
-	// it never creates, completes or substitutes a publication.
-	Target        *ArtifactTarget `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	//
+	// Types that are valid to be assigned to Selector:
+	//
+	//	*GetArtifactMetadataRequest_Artifact
+	//	*GetArtifactMetadataRequest_Target
+	Selector      isGetArtifactMetadataRequest_Selector `protobuf_oneof:"selector"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1049,19 +1110,51 @@ func (*GetArtifactMetadataRequest) Descriptor() ([]byte, []int) {
 	return file_v1_pagebroker_proto_rawDescGZIP(), []int{16}
 }
 
+func (x *GetArtifactMetadataRequest) GetSelector() isGetArtifactMetadataRequest_Selector {
+	if x != nil {
+		return x.Selector
+	}
+	return nil
+}
+
 func (x *GetArtifactMetadataRequest) GetArtifact() *PublishedArtifact {
 	if x != nil {
-		return x.Artifact
+		if x, ok := x.Selector.(*GetArtifactMetadataRequest_Artifact); ok {
+			return x.Artifact
+		}
 	}
 	return nil
 }
 
 func (x *GetArtifactMetadataRequest) GetTarget() *ArtifactTarget {
 	if x != nil {
-		return x.Target
+		if x, ok := x.Selector.(*GetArtifactMetadataRequest_Target); ok {
+			return x.Target
+		}
 	}
 	return nil
 }
+
+type isGetArtifactMetadataRequest_Selector interface {
+	isGetArtifactMetadataRequest_Selector()
+}
+
+type GetArtifactMetadataRequest_Artifact struct {
+	// Exact committed publication, as persisted after checkpoint Commit.
+	Artifact *PublishedArtifact `protobuf:"bytes,1,opt,name=artifact,proto3,oneof"`
+}
+
+type GetArtifactMetadataRequest_Target struct {
+	// Identity lookup for a publication whose descriptor was never received, for example
+	// after a lost Commit reply or an agent restart. Resolves the single publication for
+	// that store, artifact UID and container, or fails with ARTIFACT_NOT_FOUND. Reads only;
+	// it never creates, completes or substitutes a publication.
+	Target *ArtifactTarget `protobuf:"bytes,2,opt,name=target,proto3,oneof"`
+}
+
+func (*GetArtifactMetadataRequest_Artifact) isGetArtifactMetadataRequest_Selector() {}
+
+func (*GetArtifactMetadataRequest_Target) isGetArtifactMetadataRequest_Selector() {}
 
 type PrepareDirectCheckpointRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -2276,21 +2369,27 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\bartifact\x18\x02 \x01(\v2(.snapshot.pagebroker.v1.ArtifactIdentityR\bartifact\"W\n" +
 	"\x11PublishedArtifact\x12\x19\n" +
 	"\bstore_id\x18\x01 \x01(\tR\astoreId\x12'\n" +
-	"\x0fartifact_handle\x18\x02 \x01(\tR\x0eartifactHandle\"\xdc\x01\n" +
-	"\x14StagedRestoreRequest\x12>\n" +
-	"\x06source\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\x06source\x12=\n" +
-	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\x12E\n" +
-	"\bartifact\x18\x03 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactR\bartifact\"\x95\x01\n" +
+	"\x0fartifact_handle\x18\x02 \x01(\tR\x0eartifactHandle\"\xec\x01\n" +
+	"\x14StagedRestoreRequest\x12@\n" +
+	"\x06source\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendH\x00R\x06source\x12G\n" +
+	"\bartifact\x18\x03 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactH\x00R\bartifact\x12=\n" +
+	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngineB\n" +
+	"\n" +
+	"\bselector\"\x95\x01\n" +
 	"\x14DirectRestoreRequest\x12>\n" +
 	"\x06source\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\x06source\x12=\n" +
-	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\xe9\x01\n" +
-	"\x1ePrepareStagedCheckpointRequest\x12H\n" +
-	"\vdestination\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\vdestination\x12=\n" +
-	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\x12>\n" +
-	"\x06target\x18\x03 \x01(\v2&.snapshot.pagebroker.v1.ArtifactTargetR\x06target\"\xa3\x01\n" +
-	"\x1aGetArtifactMetadataRequest\x12E\n" +
-	"\bartifact\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactR\bartifact\x12>\n" +
-	"\x06target\x18\x02 \x01(\v2&.snapshot.pagebroker.v1.ArtifactTargetR\x06target\"\xa9\x01\n" +
+	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\xf9\x01\n" +
+	"\x1ePrepareStagedCheckpointRequest\x12J\n" +
+	"\vdestination\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendH\x00R\vdestination\x12@\n" +
+	"\x06target\x18\x03 \x01(\v2&.snapshot.pagebroker.v1.ArtifactTargetH\x00R\x06target\x12=\n" +
+	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngineB\n" +
+	"\n" +
+	"\bselector\"\xb3\x01\n" +
+	"\x1aGetArtifactMetadataRequest\x12G\n" +
+	"\bartifact\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactH\x00R\bartifact\x12@\n" +
+	"\x06target\x18\x02 \x01(\v2&.snapshot.pagebroker.v1.ArtifactTargetH\x00R\x06targetB\n" +
+	"\n" +
+	"\bselector\"\xa9\x01\n" +
 	"\x1ePrepareDirectCheckpointRequest\x12H\n" +
 	"\vdestination\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\vdestination\x12=\n" +
 	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\x0f\n" +
@@ -2445,13 +2544,13 @@ var file_v1_pagebroker_proto_depIdxs = []int32{
 	6,  // 7: snapshot.pagebroker.v1.RestoreGpuRequest.context:type_name -> snapshot.pagebroker.v1.GpuContext
 	11, // 8: snapshot.pagebroker.v1.ArtifactTarget.artifact:type_name -> snapshot.pagebroker.v1.ArtifactIdentity
 	2,  // 9: snapshot.pagebroker.v1.StagedRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 10: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	13, // 11: snapshot.pagebroker.v1.StagedRestoreRequest.artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
+	13, // 10: snapshot.pagebroker.v1.StagedRestoreRequest.artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
+	4,  // 11: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
 	2,  // 12: snapshot.pagebroker.v1.DirectRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
 	4,  // 13: snapshot.pagebroker.v1.DirectRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
 	2,  // 14: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 15: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	12, // 16: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.target:type_name -> snapshot.pagebroker.v1.ArtifactTarget
+	12, // 15: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.target:type_name -> snapshot.pagebroker.v1.ArtifactTarget
+	4,  // 16: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
 	13, // 17: snapshot.pagebroker.v1.GetArtifactMetadataRequest.artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
 	12, // 18: snapshot.pagebroker.v1.GetArtifactMetadataRequest.target:type_name -> snapshot.pagebroker.v1.ArtifactTarget
 	2,  // 19: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
@@ -2500,6 +2599,18 @@ func file_v1_pagebroker_proto_init() {
 	file_v1_pagebroker_proto_msgTypes[3].OneofWrappers = []any{
 		(*IOEngine_PosixCopy)(nil),
 		(*IOEngine_Nixl)(nil),
+	}
+	file_v1_pagebroker_proto_msgTypes[13].OneofWrappers = []any{
+		(*StagedRestoreRequest_Source)(nil),
+		(*StagedRestoreRequest_Artifact)(nil),
+	}
+	file_v1_pagebroker_proto_msgTypes[15].OneofWrappers = []any{
+		(*PrepareStagedCheckpointRequest_Destination)(nil),
+		(*PrepareStagedCheckpointRequest_Target)(nil),
+	}
+	file_v1_pagebroker_proto_msgTypes[16].OneofWrappers = []any{
+		(*GetArtifactMetadataRequest_Artifact)(nil),
+		(*GetArtifactMetadataRequest_Target)(nil),
 	}
 	file_v1_pagebroker_proto_msgTypes[20].OneofWrappers = []any{
 		(*Request_StagedRestore)(nil),

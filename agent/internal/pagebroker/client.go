@@ -48,7 +48,10 @@ func (c Client) StagedRestore(ctx context.Context, transactionID, source string)
 
 func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destination string) (string, error) {
 	response, err := c.request(ctx, transactionID, &Request_PrepareStagedCheckpoint{
-		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},
+		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{
+			Selector: &PrepareStagedCheckpointRequest_Destination{Destination: filesystem(destination)},
+			IoEngine: posixCopy(),
+		},
 	})
 	if err != nil {
 		return "", err
@@ -273,7 +276,10 @@ func exchangeResponse(ctx context.Context, connection *net.UnixConn, request *Re
 }
 
 func stagedRestore(source string) isRequest_Command {
-	return &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()}}
+	return &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{
+		Selector: &StagedRestoreRequest_Source{Source: filesystem(source)},
+		IoEngine: posixCopy(),
+	}}
 }
 
 func directRestore(source string) isRequest_Command {

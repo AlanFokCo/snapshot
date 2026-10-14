@@ -95,20 +95,20 @@ func TestArtifactAndLegacySelectors(t *testing.T) {
 		call    func(Client, context.Context) (string, error)
 		result  isResponse_Result
 	}{
-		{"artifact checkpoint", &Request_PrepareStagedCheckpoint{PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Target: target}},
+		{"artifact checkpoint", &Request_PrepareStagedCheckpoint{PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Selector: &PrepareStagedCheckpointRequest_Target{Target: target}}},
 			func(c Client, ctx context.Context) (string, error) {
 				return c.PrepareArtifactCheckpoint(ctx, "tx", target, nil)
 			},
 			&Response_StagedCheckpointDirectory{StagedCheckpointDirectory: &StagedCheckpointDirectory{ImageDirectory: proto.String("/staging/checkpoint/tx")}}},
-		{"artifact restore", &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{Artifact: artifact}},
+		{"artifact restore", &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{Selector: &StagedRestoreRequest_Artifact{Artifact: artifact}}},
 			func(c Client, ctx context.Context) (string, error) {
 				return c.StagedArtifactRestore(ctx, "tx", artifact, nil)
 			},
 			&Response_StagedRestoreDirectory{StagedRestoreDirectory: &StagedRestoreDirectory{ImageDirectory: proto.String("/staging/restore/tx")}}},
-		{"metadata", &Request_GetArtifactMetadata{GetArtifactMetadata: &GetArtifactMetadataRequest{Artifact: artifact}},
+		{"metadata", &Request_GetArtifactMetadata{GetArtifactMetadata: &GetArtifactMetadataRequest{Selector: &GetArtifactMetadataRequest_Artifact{Artifact: artifact}}},
 			func(c Client, ctx context.Context) (string, error) { return c.GetArtifactMetadata(ctx, "tx", artifact) },
 			&Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{ManifestDirectory: "/staging/metadata/tx", Artifact: artifact}}},
-		{"metadata lookup", &Request_GetArtifactMetadata{GetArtifactMetadata: &GetArtifactMetadataRequest{Target: target}},
+		{"metadata lookup", &Request_GetArtifactMetadata{GetArtifactMetadata: &GetArtifactMetadataRequest{Selector: &GetArtifactMetadataRequest_Target{Target: target}}},
 			func(c Client, ctx context.Context) (string, error) {
 				resolved, directory, err := c.LookupArtifactMetadata(ctx, "tx", target)
 				if err == nil && !proto.Equal(resolved, artifact) {
@@ -117,12 +117,12 @@ func TestArtifactAndLegacySelectors(t *testing.T) {
 				return directory, err
 			},
 			&Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{ManifestDirectory: "/staging/metadata/tx", Artifact: artifact}}},
-		{"legacy checkpoint", &Request_PrepareStagedCheckpoint{PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Destination: filesystem("/checkpoints/destination"), IoEngine: posixCopy()}},
+		{"legacy checkpoint", &Request_PrepareStagedCheckpoint{PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Selector: &PrepareStagedCheckpointRequest_Destination{Destination: filesystem("/checkpoints/destination")}, IoEngine: posixCopy()}},
 			func(c Client, ctx context.Context) (string, error) {
 				return c.PrepareCheckpoint(ctx, "tx", "/checkpoints/destination")
 			},
 			&Response_StagedCheckpointDirectory{StagedCheckpointDirectory: &StagedCheckpointDirectory{ImageDirectory: proto.String("/staging/checkpoint/tx")}}},
-		{"legacy restore", &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{Source: filesystem("/checkpoints/source"), IoEngine: posixCopy()}},
+		{"legacy restore", &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{Selector: &StagedRestoreRequest_Source{Source: filesystem("/checkpoints/source")}, IoEngine: posixCopy()}},
 			func(c Client, ctx context.Context) (string, error) {
 				return c.StagedRestore(ctx, "tx", "/checkpoints/source")
 			},
