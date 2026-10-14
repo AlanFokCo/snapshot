@@ -102,6 +102,11 @@ func TestCPUFeaturesCheck(t *testing.T) {
 			name:   "target CPU features unknown",
 			source: features("avx2", "avx512f"),
 		},
+		{
+			name:   "target lists no instruction set",
+			source: features("avx2", "avx512f"),
+			target: features("hypervisor", "constant_tsc"),
+		},
 	}
 
 	for _, tc := range tests {

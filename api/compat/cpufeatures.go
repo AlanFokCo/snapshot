@@ -37,9 +37,13 @@ var instructionSetFeatures = sets.New(strings.Fields(`
 // refuse restores that work. A CPU with none of them is unknown, so the result
 // is then nil.
 func InstructionSetFeatures(flags []string) []string {
-	features := instructionSetFeatures.Intersection(sets.New(flags...))
+	features := instructionSets(flags)
 	if features.Len() == 0 {
 		return nil
 	}
 	return sets.List(features)
+}
+
+func instructionSets(flags []string) sets.Set[string] {
+	return instructionSetFeatures.Intersection(sets.New(flags...))
 }
