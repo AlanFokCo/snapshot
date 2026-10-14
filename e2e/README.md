@@ -339,7 +339,7 @@ SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapsho
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
 
-To test a [multi-GPU recipe](../docs/guides/cuda-shared-memory.md#multi-gpu-models),
+To test a [multi-GPU recipe](../docs/guides/cuda-shared-memory.md#recipes),
 set `SNAPSHOT_E2E_RECIPE` to its manifest filename without `.yaml`:
 
 ```bash

@@ -5,31 +5,18 @@ SPDX-License-Identifier: Apache-2.0
 
 # Run a multi-GPU example
 
-These examples enable CUDA shared-memory checkpointing on one node with eight
-B200 GPUs. The single-GPU [vLLM](vllm.md), [SGLang](sglang.md), and
-[TensorRT-LLM](tensorrt-llm.md) examples do not need this option.
+These recipes checkpoint and restore an eight-GPU workload on one node.
 
 ## Prerequisites
 
-- [Install Snapshot](../operations/install.md) with matching agent and operator builds.
-- Have eight B200 GPUs and the CPU and memory requested by the selected manifests.
-- Have a ReadWriteMany storage class for the 2 TiB [model cache](model-cache-pvc.yaml),
-  or set `claimName` in the chosen capture and restore manifests to an existing
-  Hugging Face cache PVC.
-  Set the cache PVC's `storageClassName` if that class is not the default.
-- For Deployment capture, install `envsubst` (`gettext-base` on Debian and Ubuntu).
+- [Snapshot installed](../operations/install.md) on nodes that meet the
+  [driver requirements](../../README.md#prerequisites).
+- Eight GPUs on one node, with the CPU and memory the manifests request. The
+  manifests select B200 nodes. Change `nodeSelector` for other GPUs.
+- A ReadWriteMany storage class for the [model cache](model-cache-pvc.yaml).
+- For Deployment capture, `envsubst` (`gettext-base` on Debian and Ubuntu).
 
-## Multi-GPU models
-
-The large models below are mixture-of-experts (MoE) models. They use TEP8:
-tensor parallelism across eight GPUs for attention and expert parallelism across
-the same eight GPUs for MoE layers. vLLM sets `tensor_parallel_size=8` and
-`enable_expert_parallel=true`, SGLang sets `tp_size=8` and `ep_size=8`, and
-TensorRT-LLM sets `tensor_parallel_size=8` and `moe_expert_parallel_size=8`.
-The dense Qwen3-0.6B recipes remain single-GPU.
-
-Choose a Deployment or SnapshotJob for capture. Each engine shares one
-`restore/8-gpu.yaml`, `app.py`, and ConfigMap across its models.
+## Recipes
 
 | Model | Engine | Deployment | SnapshotJob | Restore |
 | --- | --- | --- | --- | --- |
@@ -39,10 +26,12 @@ Choose a Deployment or SnapshotJob for capture. Each engine shares one
 | DeepSeek V4.1 Flash | vLLM | [Manifest](vllm/capture/deepseek-v4.1-flash.yaml) | [Manifest](vllm/capture/deepseek-v4.1-flash-snapshotjob.yaml) | [Manifest](vllm/restore/8-gpu.yaml) |
 | DeepSeek V4.1 Flash | SGLang | [Manifest](sglang/capture/deepseek-v4.1-flash.yaml) | [Manifest](sglang/capture/deepseek-v4.1-flash-snapshotjob.yaml) | [Manifest](sglang/restore/8-gpu.yaml) |
 
-## Prepare the workload
+The steps below use vLLM with GLM 5.3. For another recipe, use its engine's
+`app.py`, ConfigMap name, and manifests from the table.
 
-Run from the repository root. This example uses vLLM. For another engine, use
-its `app.py`, ConfigMap name, and manifests from the table.
+## 1. Prepare
+
+Run from the repository root:
 
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
@@ -55,36 +44,11 @@ kubectl create configmap vllm-app --namespace "$SNAPSHOT_NAMESPACE" \
   --dry-run=client -o yaml | kubectl apply --filename -
 ```
 
-Choose one of the following capture paths.
+## 2. Capture
 
-## Capture without SnapshotJob
+Use either a SnapshotJob or a Deployment.
 
-Set `SNAPSHOT_AGENT_IMAGE` to the digest-pinned image used by the installed
-Snapshot agent. The Deployment sets the opt-in annotation, installs the libraries,
-and starts the workload under `cuinterpose-launch`. Capture fails early if the
-annotation is enabled but the command does not start with the launcher prefix.
-
-```bash
-export SNAPSHOT_AGENT_IMAGE=<registry>/snapshot/agent@sha256:<digest>
-
-envsubst '${SNAPSHOT_AGENT_IMAGE}' < docs/guides/vllm/capture/glm-5.3.yaml | \
-  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
-
-kubectl rollout status --namespace "$SNAPSHOT_NAMESPACE" \
-  deployment/vllm-glm-5-3-source --timeout=60m
-
-kubectl get pods --namespace "$SNAPSHOT_NAMESPACE" \
-  --selector app=vllm-glm-5-3-source
-```
-
-[Create a PodSnapshot](checkpoint.md#option-1--podsnapshot-checkpoint-a-running-replica)
-for the ready source Pod. After the checkpoint is ready, delete the source
-Deployment if you need its GPUs for restore.
-
-## Capture with SnapshotJob
-
-The operator installs the libraries, waits for the workload to become ready,
-creates the checkpoint, and removes the source Pod.
+### With a SnapshotJob
 
 ```bash
 kubectl apply --namespace "$SNAPSHOT_NAMESPACE" \
@@ -94,16 +58,28 @@ kubectl wait --namespace "$SNAPSHOT_NAMESPACE" \
   --for=condition=Completed snapshotjob/vllm-glm-5-3-snapshot --timeout=120m
 ```
 
-## Restore
+### With a Deployment
 
-In your engine's `restore/8-gpu.yaml`, replace `<snapshot-name>` with the ready
-PodSnapshot name. For the vLLM GLM SnapshotJob above, set:
+Set `SNAPSHOT_AGENT_IMAGE` to the image of the installed Snapshot agent:
 
-```yaml
-nvidia.com/restore-from: vllm-glm-5-3-snapshot
+```bash
+export SNAPSHOT_AGENT_IMAGE=<registry>/snapshot/agent@sha256:<digest>
+
+envsubst '${SNAPSHOT_AGENT_IMAGE}' < docs/guides/vllm/capture/glm-5.3.yaml | \
+  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+
+kubectl rollout status --namespace "$SNAPSHOT_NAMESPACE" \
+  deployment/vllm-glm-5-3-source --timeout=60m
 ```
 
-Keep the same model-cache PVC populated by capture, then apply the manifest:
+Then [create a PodSnapshot](checkpoint.md#option-1--podsnapshot-checkpoint-a-running-replica)
+for the ready source Pod. Delete the source Deployment after the checkpoint is
+ready to free its GPUs.
+
+## 3. Restore
+
+In `restore/8-gpu.yaml`, set `nvidia.com/restore-from` to the PodSnapshot name,
+such as `vllm-glm-5-3-snapshot`, then apply it:
 
 ```bash
 kubectl apply --namespace "$SNAPSHOT_NAMESPACE" \

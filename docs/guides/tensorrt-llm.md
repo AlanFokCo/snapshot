@@ -180,7 +180,7 @@ kubectl wait --namespace "$SNAPSHOT_NAMESPACE" \
 
 Then use the same [restore manifest](tensorrt-llm/restore/single-gpu.yaml).
 
-For multi-GPU examples, see [Multi-GPU models](cuda-shared-memory.md#multi-gpu-models).
+For multi-GPU examples, see [Run a multi-GPU example](cuda-shared-memory.md).
 
 ## Next steps
 

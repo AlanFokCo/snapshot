@@ -26,7 +26,7 @@ Download the one for the framework in use:
 - vLLM: [single GPU](vllm/restore/single-gpu.yaml), [eight GPUs](vllm/restore/8-gpu.yaml)
 - SGLang: [single GPU](sglang/restore/single-gpu.yaml), [eight GPUs](sglang/restore/8-gpu.yaml)
 - TensorRT-LLM: [single GPU](tensorrt-llm/restore/single-gpu.yaml), [eight GPUs](tensorrt-llm/restore/8-gpu.yaml)
-- [Multi-GPU examples](cuda-shared-memory.md#multi-gpu-models)
+- [Multi-GPU examples](cuda-shared-memory.md#recipes)
 
 Set the namespace where the restored replica will run — the same one holding the
 `PodSnapshot`:
