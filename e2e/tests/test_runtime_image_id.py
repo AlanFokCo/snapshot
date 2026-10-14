@@ -172,7 +172,6 @@ def test_record_cpu_feature_reports_a_checkpoint_that_recorded_none(monkeypatch)
         lifecycle.record_cpu_feature(config, "node", "content-uid", "amx_tile")
 
 
-
 @pytest.mark.parametrize("image_id", ["", "sha256:" + "a" * 64])
 @pytest.mark.parametrize(
     "defect",
