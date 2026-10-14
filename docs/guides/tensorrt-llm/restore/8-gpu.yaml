@@ -50,6 +50,7 @@ spec:
               cpu: "16"
               memory: 1Ti
             limits:
+              memory: 1Ti
               nvidia.com/gpu: "8"
           readinessProbe:
             exec:

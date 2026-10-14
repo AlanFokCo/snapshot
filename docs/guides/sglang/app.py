@@ -40,11 +40,12 @@ def create_engine(overrides: dict[str, Any], snapshot_mode: bool) -> Any:
         "context_length": int(os.environ.get("SGLANG_CONTEXT_LENGTH", "10240")),
         "page_size": int(os.environ.get("SGLANG_PAGE_SIZE", "16")),
         "trust_remote_code": False,
+        "log_level": "info",
+        **overrides,
+        # Capture releases KV through the memory saver and keeps no CPU weight copy.
         "enable_memory_saver": snapshot_mode,
         "enable_weights_cpu_backup": False,
-        "log_level": "info",
     }
-    engine_args.update(overrides)
     return sgl.Engine(**engine_args)
 
 

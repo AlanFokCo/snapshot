@@ -93,13 +93,14 @@ async def main() -> None:
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
     engine_args = {
-        "enable_sleep_mode": True,
         "max_model_len": MAX_MODEL_LEN,
         "gpu_memory_utilization": GPU_MEMORY_UTILIZATION,
         "trust_remote_code": TRUST_REMOTE_CODE,
+        # JSON keys are AsyncEngineArgs API keyword arguments, not CLI flags.
+        **json.loads(sys.argv[1]),
+        # Capture releases KV through sleep mode.
+        "enable_sleep_mode": True,
     }
-    # JSON keys are AsyncEngineArgs API keyword arguments, not CLI flags.
-    engine_args.update(json.loads(sys.argv[1]))
     engine = AsyncLLM.from_engine_args(
         AsyncEngineArgs(**engine_args),
         usage_context=UsageContext.LLM_CLASS,
