@@ -33,10 +33,12 @@ var cpuFeaturesCheck = check{
 	name: CheckCPUFeatures,
 	gate: GatePreflight,
 	compare: func(source, target Environment) []Mismatch {
-		if len(source.CPUFeatures) == 0 || len(target.CPUFeatures) == 0 {
+		needed := instructionSets(source.CPUFeatures)
+		offered := instructionSets(target.CPUFeatures)
+		if needed.Len() == 0 || offered.Len() == 0 {
 			return nil
 		}
-		missing := sets.New(InstructionSetFeatures(source.CPUFeatures)...).Difference(sets.New(target.CPUFeatures...))
+		missing := needed.Difference(offered)
 		if missing.Len() == 0 {
 			return nil
 		}
