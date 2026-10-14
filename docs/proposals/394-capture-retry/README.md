@@ -117,7 +117,7 @@ the cheapest recovery that fits:
 | Suspended, and can be dumped as it stands | dump again, leaving the GPU state alone |
 | Suspended, but the failed attempt left it unusable | revive it, then suspend and dump again |
 | Terminated, checkpoint staged | store again; no live workload is needed |
-| Terminated, nothing staged | the capture fails |
+| Terminated before a dump completed | the capture fails — nothing is left to retry from |
 
 The second row is the one that matters most. Suspending a workload's GPU state
 is by far the expensive step, and a failed dump usually leaves that work done
@@ -194,8 +194,14 @@ Release is therefore a confirmed step, not best-effort.
 ## Design Details
 
 Retry lives entirely within the node agent, inside the handling of one
-`PodSnapshotContent`, under the in-flight guard and capture lease the agent
-already holds. No controller above the agent participates.
+`PodSnapshotContent`. No controller above the agent participates.
+
+Two existing mechanisms bound an attempt. The **in-flight guard** is
+process-local and stops one agent starting a second attempt for the same work
+order. The **capture lease** is a Kubernetes `Lease` naming the agent that owns
+the work order, so that overlapping agent instances — during a rollout, say —
+cannot both capture the same workload. Both are already held while a capture
+runs; retry simply keeps them across attempts.
 
 ### Deciding what to repeat
 
@@ -214,7 +220,7 @@ By the time a dump runs, the suspend has already moved the workload's GPU
 memory to host memory — the expensive step. So after a dump fails the agent
 needs to answer one question: **can CRIU dump this process again as it
 stands?** If it can, the retry costs only the dump. If it cannot, the workload
-has to be put back to running and suspended a fresh, paying that GPU transfer a
+has to be put back to running and suspended afresh, paying that GPU transfer a
 second time.
 
 The answer can be 'no' because dumping is invasive. To dump a process tree CRIU
@@ -298,8 +304,10 @@ A probe that cannot account for the workload is the primary rule. Alongside it:
   node, and an in-place retry stays on this node.
 - **Destination store exhaustion**, and **an image too large for the node's
   staging** ([Protecting the node agent](#protecting-the-node-agent)).
-- **Staged data lost after a successful dump** — the workload is already gone,
-  so there is nothing to dump again.
+- **Staged data lost after a successful dump.** A guard, not an expected path:
+  it needs the broker to restart or the transaction to expire inside the capture
+  window. The dump has already terminated the workload, so there is nothing left
+  to dump again.
 - **Broker rejections a retry cannot change** — a malformed request or a
   destination conflict.
 
@@ -308,6 +316,13 @@ storage errors, and internal errors. The protocol sanctions releasing and
 retrying with a new transaction for the latter two.
 
 ### Protecting the node agent
+
+This is in scope because retry makes it load-bearing rather than merely
+desirable. Removing the agent's kill-on-failure means a failed dump no longer
+tidies up after itself, retrying adds attempts and new recovery code to the
+same path, and — most of all — an oversized capture that kills the agent would
+be *retried*, turning one bad request into repeated node-wide outages. A retry
+mechanism on an agent that dies this easily makes things worse, not better.
 
 Two ways a single capture can terminate the agent that serves every capture and
 restore on its node.
@@ -319,32 +334,27 @@ and lease, and lets the agent continue. Values read from a `PodSnapshotContent`
 or a pod are treated as untrusted, so a violated invariant becomes a terminal
 status with a named reason rather than a crash.
 
-**Memory exhaustion.** CRIU writes the staged image from the agent's own
-container, and memory-backed staging pages are charged to the writer, so a
-checkpoint larger than the agent's memory limit terminates the agent with no
-error at all. Staging is a memory-backed `emptyDir` that today carries no
-`sizeLimit`, so it can grow until the agent's cgroup kills it.
+**Memory exhaustion.** Staging is a memory-backed `emptyDir`, and CRIU writes
+the image into it from the agent's own container, so those pages count against
+the agent's memory limit. A checkpoint bigger than that limit kills the agent —
+no error, just a dead process, taking every other capture and restore on the
+node with it. The volume carries no `sizeLimit` today, so nothing stops it.
 
-The containment is a bound the kernel enforces: a `sizeLimit` makes the volume
-fill first, so the write fails with `ENOSPC` and the agent handles an ordinary
-capture failure. It must leave room rather than merely match, because staging
-pages and the agent's own allocations share one cgroup — the invariant is
-**staging `sizeLimit` ≤ agent memory limit − reserve**, where the reserve
-covers peak non-staging use. Sizing that reserve, and testing that a staging
-write returns `ENOSPC` before the agent reaches its limit, are part of the work.
+The fix is to cap the volume. With a `sizeLimit` the volume fills before the
+cgroup does, the write fails with `ENOSPC`, and the agent reports an ordinary
+capture failure. The cap has to leave headroom for the agent's own allocations,
+which share the same cgroup: **staging `sizeLimit` ≤ agent memory limit −
+reserve**. Choosing that reserve, and proving `ENOSPC` arrives first, are part
+of the work.
 
-A pre-staging size estimate is an optimisation on top, not the safeguard. Image
-size is bounded only from *below* by the workload's resident memory plus its
-GPU state, and a lower bound can prove an image will not fit, never that it
-will — so it is used in that direction only, to fail before a model's worth of
-time is spent.
+The agent also estimates the image before staging, but only to reject what
+provably cannot fit — the estimate is a lower bound, so it can establish "too
+big", never "fits".
 
-**Telling a full node from an image that will never fit.** Both surface the
-same broker error, and confusing them would spend the retry limit on an image
-that cannot succeed. The failing step separates them: refusal before any bytes
-are written means the node is busy and nothing about this image is implicated,
-so it is retryable; `ENOSPC` once the dump is writing proves the image exceeds
-capacity, so it ends the capture with the measured shortfall.
+**Which kind of shortage?** Both reach the agent as the same broker error.
+Refusal before any bytes are written means the node is momentarily full, which
+is retryable. `ENOSPC` while writing means this image exceeds the cap, which
+ends the capture with the measured shortfall.
 
 ### Storage cleanup
 
@@ -365,8 +375,8 @@ the test plan.
 The retry limit is configurable cluster-wide and per capture, so two surfaces
 change.
 
-**Cluster-wide default** — a retry setting in the agent configuration, rendered
-by the Helm chart ([Configuration](#configuration)).
+**Cluster-wide default** — a retry setting in the agent configuration,
+rendered by the Helm chart.
 
 **Per-capture value** — an optional field on `PodSnapshot.spec`, the object that
 represents a capture request.
@@ -448,6 +458,27 @@ succeeds on retry, one that exhausts its retries, and one hitting an
 immediate-failure classification, each asserting the resulting conditions and
 events. That the artifact destination stays empty until a genuine commit is
 asserted directly, since same-destination retry depends on it.
+
+**The two suspended cases**, which decide whether a retry is cheap or
+expensive, are covered on a GPU node:
+
+- *Suspended and dumpable.* Suspend the workload, then fail the dump by
+  constraining staging so the write hits `ENOSPC` after the tree is frozen.
+  Assert the probe finds all four signals clean, that the retry dumps without
+  touching the GPU state, and that the capture then succeeds. The GPU state is
+  asserted untouched by checking it reads `checkpointed` throughout.
+- *Suspended and not dumpable.* The mixed-GPU-state variant is directly
+  constructible — lock every process, checkpoint only some — and is asserted to
+  drive a revive followed by a fresh suspend and a successful capture. The
+  remaining variants (a process left traced or stopped, or in uninterruptible
+  sleep) cannot be produced reliably from outside CRIU, so they are covered at
+  unit level against a faked probe, which is also where each signal is tested
+  failing on its own.
+
+Both cases assert data integrity rather than liveness: the workload holds a
+known pattern in GPU memory and re-checksums it on the device, so a capture
+that succeeds after a revive has to produce a restorable artifact, not merely a
+live process.
 
 ### Graduation Criteria
 
