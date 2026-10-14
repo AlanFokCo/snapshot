@@ -90,6 +90,12 @@ func TestCPUFeaturesCheck(t *testing.T) {
 			want:   []Mismatch{{Check: CheckCPUFeatures, Source: "avx512bw,avx512f,avx512vl", Target: "missing"}},
 		},
 		{
+			name:   "instructions CRIU's mask omits still refuse",
+			source: features("avx512ifma", "clwb", "sse2"),
+			target: features("sse2"),
+			want:   []Mismatch{{Check: CheckCPUFeatures, Source: "avx512ifma,clwb", Target: "missing"}},
+		},
+		{
 			name:   "flags that name no instruction never refuse",
 			source: features("avx2", "hypervisor", "constant_tsc"),
 			target: features("avx2"),

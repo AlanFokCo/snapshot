@@ -31,6 +31,11 @@ func TestInstructionSetFeatures(t *testing.T) {
 			want:  []string{"pni"},
 		},
 		{
+			name:  "instructions CRIU's mask omits",
+			flags: []string{"clwb", "avx512ifma", "lahf_lm", "fma", "hypervisor"},
+			want:  []string{"avx512ifma", "clwb", "fma", "lahf_lm"},
+		},
+		{
 			name:  "entries of CRIU's mask that name no instruction",
 			flags: []string{"rep_good", "tme", "monitor", "rtm"},
 			want:  []string{"rtm"},
