@@ -5,7 +5,7 @@ roadmap.
 
 ## Current limitations
 
-- Single-GPU workloads only.
+- Multi-GPU workloads must run on a single node.
 - x86_64 nodes only.
 - vGPU is not supported.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
@@ -14,7 +14,7 @@ roadmap.
   restore, with undefined results. Disable such interception for workloads
   that will be snapshotted.
 
-Multi-GPU and Arm support are on the roadmap.
+Multi-node and Arm support are on the roadmap.
 
 ## GPU device selection and restore paths
 
