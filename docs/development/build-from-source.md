@@ -45,7 +45,7 @@ Build the pinned Model Streamer inputs first:
 make model-streamer-artifacts
 ```
 
-This builds the x86_64 core wheel and public C headers from commit
+This builds the x86_64 core and S3 wheels and public C headers from commit
 `ae93548e02be46f479e7689a7e10e9bb243bb653`, using the digest-pinned upstream
 toolchain in `agent/pagebroker/model-streamer.Dockerfile`. Fixed package version
 and ZIP timestamps make the wheel reproducible. The output defaults to
@@ -53,9 +53,9 @@ and ZIP timestamps make the wheel reproducible. The output defaults to
 CI runs this same target before building PageBroker.
 
 `docker-build-pagebroker` verifies the wheel and public headers against the
-committed SHA-256 pins. `MODEL_STREAMER_WHEEL_DIR`, `MODEL_STREAMER_INCLUDE_DIR`
+committed SHA-256 pins. `MODEL_STREAMER_WHEEL_DIR`, `MODEL_STREAMER_S3_WHEEL_DIR`, `MODEL_STREAMER_INCLUDE_DIR`
 and `MODEL_STREAMER_LEGAL_DIR` can select separately provisioned matching inputs.
-The image includes the native library, metadata and corresponding source
+The image includes both native libraries, metadata and corresponding source
 materials. The agent image build does not require Model Streamer.
 
 For native builds, pass `MODEL_STREAMER_INCLUDE_DIR=/path/to/include` and
@@ -70,6 +70,11 @@ bytes; one larger file runs alone. Admission closes on the first completed
 submission. All destinations remain mapped until the session ends, then pending
 work starts a new session. Terminal failures stop native access before releasing
 any affected restore; ordinary completed storage errors fail their own restore.
+
+The pinned S3 plugin tears down clients process-wide. PageBroker therefore
+admits one native session per process across restore coordinators, while reads
+within that session remain concurrent. Waiting coordinators poll cancellation
+and deadlines until the previous session has fully drained.
 
 ## 3. Push the images
 
@@ -109,3 +114,13 @@ Common `make` targets from the repo root:
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the contribution process and DCO
 sign-off.
+
+### Native S3 read verification
+
+Build the `s3-test` Docker target using the pinned wheel inputs above. Install
+`agent/pagebroker/tests/requirements.txt` in a virtual environment, then run
+`agent/pagebroker/tests/s3_integration.py --image local/pagebroker:s3-test`.
+Add `--tls` to verify the temporary CA and rejection of untrusted TLS. The
+fixture uses disposable local Moto storage and fake credentials. Payloads are
+read by the native Model Streamer plugin and checked against the restore plan's
+SHA-256 digests before final permissions are applied.
