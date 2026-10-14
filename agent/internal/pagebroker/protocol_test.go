@@ -15,6 +15,9 @@ import (
 
 // Both languages read the same fixed wire vectors. Changing a tag or dropping a
 // field must fail here even when a same-version round trip would still succeed.
+// The fixture bytes are in field-number order, which is what the C++ encoder
+// emits and checks byte for byte. Go emits oneof members after the plain
+// fields, so it checks its own encoding by length and by decoding it back.
 func TestSharedProtocolFixtures(t *testing.T) {
 	data, err := os.ReadFile("../../pagebroker/testdata/storage-contract/wire.json")
 	if err != nil {
@@ -34,15 +37,17 @@ func TestSharedProtocolFixtures(t *testing.T) {
 	}
 	for _, fixture := range fixtures.Cases {
 		t.Run(fixture.Name, func(t *testing.T) {
-			var expected, decoded proto.Message
-			switch fixture.Type {
-			case "Request":
-				expected, decoded = new(Request), new(Request)
-			case "Response":
-				expected, decoded = new(Response), new(Response)
-			default:
+			newMessage := func() proto.Message {
+				switch fixture.Type {
+				case "Request":
+					return new(Request)
+				case "Response":
+					return new(Response)
+				}
 				t.Fatalf("unknown fixture type %q", fixture.Type)
+				return nil
 			}
+			expected := newMessage()
 			if err := prototext.Unmarshal([]byte(fixture.Text), expected); err != nil {
 				t.Fatal(err)
 			}
@@ -50,6 +55,7 @@ func TestSharedProtocolFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			decoded := newMessage()
 			if err := proto.Unmarshal(wire, decoded); err != nil {
 				t.Fatal(err)
 			}
@@ -60,8 +66,15 @@ func TestSharedProtocolFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if hex.EncodeToString(encoded) != fixture.WireHex {
-				t.Fatal("wire contract changed")
+			if len(encoded) != len(wire) {
+				t.Fatalf("wire contract changed: encoded %d bytes, fixture %d", len(encoded), len(wire))
+			}
+			reencoded := newMessage()
+			if err := proto.Unmarshal(encoded, reencoded); err != nil {
+				t.Fatal(err)
+			}
+			if !proto.Equal(expected, reencoded) {
+				t.Fatalf("re-encoded fields differ: %v", reencoded)
 			}
 		})
 	}
