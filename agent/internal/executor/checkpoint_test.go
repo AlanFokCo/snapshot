@@ -51,6 +51,10 @@ func (checkpointPathRuntime) ResolveContainerImageID(context.Context, string) (s
 	return "", errors.New("not implemented")
 }
 
+func (checkpointPathRuntime) ResolveContainerPodUID(context.Context, string) (string, error) {
+	return "", errors.New("not implemented")
+}
+
 func (checkpointPathRuntime) TerminateContainer(context.Context, string) error {
 	return errors.New("not implemented")
 }
