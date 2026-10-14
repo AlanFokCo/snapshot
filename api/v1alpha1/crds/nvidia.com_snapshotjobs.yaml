@@ -9013,8 +9013,8 @@ spec:
               rule: '!has(self.onFailurePolicy) || self.onFailurePolicy != ''CleanupNonTargetArtifacts''
                 || (has(self.podTemplate.metadata) && has(self.podTemplate.metadata.annotations)
                 && ''nvidia.com/snapshot-non-target-artifact-containers'' in self.podTemplate.metadata.annotations
-                && self.podTemplate.metadata.annotations[''nvidia.com/snapshot-non-target-artifact-containers''].trim()
-                != '''')'
+                && size(self.podTemplate.metadata.annotations[''nvidia.com/snapshot-non-target-artifact-containers''].trim())
+                > 0)'
           status:
             description: SnapshotJobStatus defines the observed state of SnapshotJob.
             properties:

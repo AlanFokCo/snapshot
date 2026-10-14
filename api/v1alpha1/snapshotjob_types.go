@@ -120,7 +120,7 @@ const (
 
 // SnapshotJobSpec defines the desired state of SnapshotJob.
 // +kubebuilder:validation:XValidation:rule="self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x, x.name))",message="targetContainers must name containers present in podTemplate"
-// +kubebuilder:validation:XValidation:rule="!has(self.onFailurePolicy) || self.onFailurePolicy != 'CleanupNonTargetArtifacts' || (has(self.podTemplate.metadata) && has(self.podTemplate.metadata.annotations) && 'nvidia.com/snapshot-non-target-artifact-containers' in self.podTemplate.metadata.annotations && self.podTemplate.metadata.annotations['nvidia.com/snapshot-non-target-artifact-containers'].trim() != '')",message="CleanupNonTargetArtifacts requires declared non-target artifact containers in podTemplate.metadata.annotations"
+// +kubebuilder:validation:XValidation:rule="!has(self.onFailurePolicy) || self.onFailurePolicy != 'CleanupNonTargetArtifacts' || (has(self.podTemplate.metadata) && has(self.podTemplate.metadata.annotations) && 'nvidia.com/snapshot-non-target-artifact-containers' in self.podTemplate.metadata.annotations && size(self.podTemplate.metadata.annotations['nvidia.com/snapshot-non-target-artifact-containers'].trim()) > 0)",message="CleanupNonTargetArtifacts requires declared non-target artifact containers in podTemplate.metadata.annotations"
 type SnapshotJobSpec struct {
 	// PodTemplate defines the workload to run and capture. The controller injects
 	// the snapshot contract (control volume, readiness probe, seccomp, sidecar
