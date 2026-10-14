@@ -4,6 +4,7 @@
 suite: PageBroker sidecar
 templates:
   - templates/daemonset.yaml
+  - templates/configmap.yaml
 tests:
   - it: runs the PageBroker sidecar next to the agent at the agent's tag
     template: templates/daemonset.yaml
