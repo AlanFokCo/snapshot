@@ -9,7 +9,8 @@ end-to-end checks against a Kubernetes cluster.
 - `kubectl` and `helm`
 - For CI/vCluster mode: `vcluster`
 - A GPU Kubernetes cluster with `RuntimeClass/nvidia`, GPU Operator `26.3.0+`,
-  MIG disabled on the target GPU nodes, CUDA driver `580+`, and a storage class
+  MIG disabled on the target GPU nodes, kernel-mode driver `580+`, CUDA
+  user-mode driver (`libcuda.so`) `615+`, and a storage class
   that can provision `ReadWriteMany` volumes
 
 Set `SNAPSHOT_E2E_STORAGE_CLASS` when the cluster default cannot provision RWX
@@ -373,31 +374,6 @@ Multi-GPU recipes use PVC-backed download init containers for every engine.
 
 `tests/test_framework_manifests.py` pins the guide manifests, and the cache
 rewrite, to the restore-pod contract without a cluster.
-
-### CuInterpose qualification
-
-The coordinator and real-driver GPU suites are introduced in
-[PR #338](https://github.com/ai-dynamo/snapshot/pull/338), whose
-`agent/cmd/cuinterpose/tests/README.md` describes how to run them. The base
-cuInterpose build and Rust unit-test targets are already available on `main`.
-
-The multi-GPU recipes enable CUDA shared-memory support. See the
-[recipe guide](../docs/guides/cuda-shared-memory.md) for delivery and the
-[developer overview](../docs/development/cuinterpose.md) for the supported
-resource and synchronization contracts.
-
-Build the artifacts, then run the CPU and real-driver GPU suites:
-
-```bash
-make -C agent/cmd/cuinterpose build test test-gpu
-```
-
-These native tests do not qualify the Kubernetes/CRIU lifecycle. Run an opted-in
-multi-process workload through capture and restore, repeat with a distinct
-restore node, and verify a changed shim bundle fails before CRIU even when
-compatibility checking is skipped. Record the tested revision, hardware, and
-skipped cases; unit or reconstruction-only success does not establish those
-end-to-end results.
 
 ### Framework benchmark results
 
