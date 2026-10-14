@@ -28,17 +28,12 @@ spec:
             - -c
           args:
             - |
-              import os
+              import sys
               from huggingface_hub import snapshot_download
-              snapshot_download(
-                  repo_id=os.environ["SNAPSHOT_MODEL"],
-                  revision=os.environ["SNAPSHOT_MODEL_REVISION"],
-              )
+              snapshot_download(repo_id=sys.argv[1], revision=sys.argv[2])
+            - deepseek-ai/DeepSeek-V4.1-Flash
+            - 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
           env:
-            - name: SNAPSHOT_MODEL
-              value: deepseek-ai/DeepSeek-V4.1-Flash
-            - name: SNAPSHOT_MODEL_REVISION
-              value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
             - name: HF_HOME
               value: /hf-cache
             - name: HF_HUB_DISABLE_XET
@@ -53,55 +48,32 @@ spec:
           command:
             - python3
             - /snapshot-app/app.py
+          args:
+            - |-
+              {
+                "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+                "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+                "tensor_parallel_size": 8,
+                "tokenizer_revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+                "tokenizer_mode": "deepseek_v41", "dtype": "auto",
+                "enable_expert_parallel": true, "language_model_only": true,
+                "engram_config": {"cpu_offload": false},
+                "max_model_len": 131072, "gpu_memory_utilization": 0.9,
+                "max_num_seqs": 64, "max_num_batched_tokens": 16384,
+                "max_cudagraph_capture_size": 384, "scheduler_reserve_full_isl": false,
+                "speculative_config": {
+                  "method": "dspark", "num_speculative_tokens": 5,
+                  "draft_sample_method": "probabilistic", "rejection_sample_method": "block",
+                  "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027"
+                }
+              }
           env:
-            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
-              value: "8"
             - name: HF_HUB_DISABLE_XET
               value: "1"
-            - name: SNAPSHOT_MODEL
-              value: deepseek-ai/DeepSeek-V4.1-Flash
-            - name: VLLM_ENGINE_ARGS
-              value: |-
-                {
-                  "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
-                  "tokenizer_revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
-                  "tokenizer_mode": "deepseek_v41", "dtype": "auto",
-                  "enable_expert_parallel": true, "language_model_only": true,
-                  "engram_config": {"cpu_offload": false},
-                  "max_model_len": 131072, "gpu_memory_utilization": 0.9,
-                  "max_num_seqs": 64, "max_num_batched_tokens": 16384,
-                  "max_cudagraph_capture_size": 384, "scheduler_reserve_full_isl": false,
-                  "speculative_config": {
-                    "method": "dspark", "num_speculative_tokens": 5,
-                    "draft_sample_method": "probabilistic", "rejection_sample_method": "block",
-                    "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027"
-                  }
-                }
-            - name: SNAPSHOT_MODEL_REVISION
-              value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
             - name: HF_HOME
               value: /hf-cache
             - name: HF_HUB_OFFLINE
               value: "1"
-            # Keep compiler artifacts on the PVC mounted at /compile-cache.
-            - name: XDG_CACHE_HOME
-              value: /compile-cache/xdg
-            - name: TORCHINDUCTOR_CACHE_DIR
-              value: /compile-cache/torchinductor
-            - name: TRITON_CACHE_DIR
-              value: /compile-cache/triton
-            - name: CUDA_CACHE_PATH
-              value: /compile-cache/cuda
-            - name: DG_JIT_CACHE_DIR
-              value: /compile-cache/deepgemm
-            - name: FLASHINFER_WORKSPACE_BASE
-              value: /compile-cache/flashinfer
-            - name: VLLM_CACHE_ROOT
-              value: /compile-cache/vllm
-            - name: VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
-              value: /compile-cache/vllm/flashinfer_autotune
-            - name: TILELANG_CACHE_DIR
-              value: /compile-cache/tilelang
           ports:
             - name: api
               containerPort: 8000
@@ -120,12 +92,6 @@ spec:
             - name: app
               mountPath: /snapshot-app
               readOnly: true
-            - name: compiler-cache
-              mountPath: /compile-cache
-              subPath: compiler-cache/vllm
-            - name: compiler-cache
-              mountPath: /root/.cache/flashinfer
-              subPath: compiler-cache/vllm/flashinfer-fixed
       volumes:
         - name: model-cache
           persistentVolumeClaim:
@@ -137,6 +103,3 @@ spec:
         - name: app
           configMap:
             name: vllm-app
-        - name: compiler-cache
-          persistentVolumeClaim:
-            claimName: snapshot-compiler-cache

@@ -16,16 +16,12 @@ after restore. The Snapshot agent injects the restore tooling at runtime.
 
 Download [`app.py`](vllm/app.py), [`capture/qwen3-0.6b.yaml`](vllm/capture/qwen3-0.6b.yaml),
 and [`restore/single-gpu.yaml`](vllm/restore/single-gpu.yaml) from the
-repository, along with the [compiler-cache PVC](compiler-cache-pvc.yaml):
+repository:
 
 ```bash
 mkdir -p vllm-snapshot
 cd vllm-snapshot
 mkdir -p capture restore
-
-curl --fail --location \
-  --output compiler-cache-pvc.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/compiler-cache-pvc.yaml
 
 curl --fail --location \
   --output app.py \
@@ -66,11 +62,6 @@ log that CRIU cannot reopen after restore.
 The source and restore pods must mount the Snapshot control volume at
 `/snapshot-control`.
 
-The capture and restore manifests mount a [persistent compiler cache](compiler-cache.md).
-Use a ReadWriteMany storage class, such as `vast` on nscale, and retain this PVC
-for every checkpoint that uses it. Set `storageClassName` in
-`compiler-cache-pvc.yaml` when the default class does not provide RWX storage.
-
 ## 2. Create the app.py ConfigMap
 
 Set the namespace where the vLLM pod will run, and create the ConfigMap
@@ -79,8 +70,6 @@ Set the namespace where the vLLM pod will run, and create the ConfigMap
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
 kubectl get namespace "$SNAPSHOT_NAMESPACE"
-
-kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename compiler-cache-pvc.yaml
 
 kubectl create configmap vllm-app \
   --namespace "$SNAPSHOT_NAMESPACE" \
@@ -99,14 +88,14 @@ kubectl create configmap vllm-app \
 
 ## 3. Deploy vLLM
 
-Select the model through `SNAPSHOT_MODEL` in [`capture/qwen3-0.6b.yaml`](vllm/capture/qwen3-0.6b.yaml):
+The container argument in [`capture/qwen3-0.6b.yaml`](vllm/capture/qwen3-0.6b.yaml)
+is a JSON object of `AsyncEngineArgs` keyword arguments. Select the model there:
 
 ```yaml
 containers:
   - name: main
-    env:
-      - name: SNAPSHOT_MODEL
-        value: Qwen/Qwen3-0.6B
+    args:
+      - '{"model": "Qwen/Qwen3-0.6B"}'
 ```
 
 Other values include `TinyLlama/TinyLlama-1.1B-Chat-v1.0` or a mounted model
@@ -117,13 +106,13 @@ The example sizes the engine for a small single-GPU deployment through
 `VLLM_MAX_MODEL_LEN` (default `2048`) and `VLLM_GPU_MEMORY_UTILIZATION`
 (default `0.30`). Raise them only after validating checkpoint and restore with
 the resulting memory use. `app.py` sets `trust_remote_code=False`; Qwen3 needs
-no custom model code. Set additional `AsyncEngineArgs` keyword arguments,
-including `trust_remote_code`, through the `VLLM_ENGINE_ARGS` JSON object.
+no custom model code. Add other `AsyncEngineArgs` keyword arguments, such as
+`trust_remote_code` or `tensor_parallel_size`, to the same JSON object.
 
 > [!NOTE]
 > This example runs vLLM directly through `AsyncLLM` rather than `vllm serve`, so
-> the standard `vllm serve` command-line arguments do not apply. The model is
-> selected with `SNAPSHOT_MODEL`, and other runtime settings are supplied through
+> the standard `vllm serve` command-line arguments do not apply. Engine keyword
+> arguments come from the JSON argument, and other runtime settings are supplied through
 > vLLM's [environment variables](https://docs.vllm.ai/en/v0.31.0/configuration/env_vars/)
 > set in the Deployment's Pod template.
 

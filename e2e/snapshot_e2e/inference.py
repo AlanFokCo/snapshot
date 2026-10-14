@@ -28,13 +28,13 @@ _CHAT_CHECKS = {
 }
 
 _CHAT_PROMPTS = """
-import json, os, sys
+import json, sys
 from pathlib import Path
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
-model = os.environ["SNAPSHOT_MODEL"]
-revision = os.environ.get("SNAPSHOT_MODEL_REVISION")
+model = sys.argv[2]
+revision = sys.argv[3] or None
 path = model
 if not Path(path).is_dir():
     # The lexical parent preserves the snapshot directory for cached symlinks.
@@ -59,12 +59,12 @@ print("__snapshot_e2e_chat_prompts__" + json.dumps(prompts))
 """
 
 
-def chat_prompts(namespace: str, pod: str) -> dict[str, str]:
+def chat_prompts(namespace: str, pod: str, model: str, revision: str | None) -> dict[str, str]:
     """Render the source model's cached template before its rootfs is captured."""
     questions = {name: question for name, (question, _) in _CHAT_CHECKS.items()}
     command = (
         f"timeout 60s python3 -c {shlex.quote(_CHAT_PROMPTS)} "
-        f"{shlex.quote(json.dumps(questions))}"
+        f"{shlex.quote(json.dumps(questions))} {shlex.quote(model)} {shlex.quote(revision or '')}"
     )
     output = k8s.exec_command(namespace, pod, command)
     marker = "__snapshot_e2e_chat_prompts__"

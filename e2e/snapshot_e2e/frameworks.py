@@ -11,6 +11,7 @@ model it serves.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -125,6 +126,16 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
 }
 
 
+def guide_model(args: list[str]) -> tuple[str, str | None, int]:
+    """Model, revision, and tensor-parallel size from a guide program's engine kwargs."""
+    kwargs = json.loads(args[-1])
+    return (
+        kwargs.get("model", kwargs.get("model_path")),
+        kwargs.get("revision"),
+        kwargs.get("tensor_parallel_size", kwargs.get("tp_size", 1)),
+    )
+
+
 def framework_spec(name: str) -> FrameworkSpec:
     spec = FRAMEWORKS[name]
     recipe = os.environ.get("SNAPSHOT_E2E_RECIPE", "")
@@ -138,10 +149,9 @@ def framework_spec(name: str) -> FrameworkSpec:
     with spec.deployment_manifest.open(encoding="utf-8") as handle:
         deployment = yaml.safe_load(handle)
     main = next(c for c in deployment["spec"]["template"]["spec"]["containers"] if c["name"] == CONTAINER)
-    env = {e["name"]: e["value"] for e in main["env"]}
     return replace(
         spec,
-        model=env["SNAPSHOT_MODEL"],
+        model=guide_model(main["args"])[0],
         model_cache_manifest="../model-cache-pvc.yaml",
         source_ready_timeout_seconds=3600,
         checkpoint_timeout_seconds=1800,

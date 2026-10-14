@@ -17,16 +17,12 @@ agent injects the restore tooling at runtime.
 Download [`app.py`](tensorrt-llm/app.py),
 [`capture/qwen3-0.6b.yaml`](tensorrt-llm/capture/qwen3-0.6b.yaml), and
 [`restore/single-gpu.yaml`](tensorrt-llm/restore/single-gpu.yaml) from the
-repository, along with the [compiler-cache PVC](compiler-cache-pvc.yaml):
+repository:
 
 ```bash
 mkdir -p tensorrt-llm-snapshot
 cd tensorrt-llm-snapshot
 mkdir -p capture restore
-
-curl --fail --location \
-  --output compiler-cache-pvc.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/compiler-cache-pvc.yaml
 
 curl --fail --location \
   --output app.py \
@@ -58,8 +54,7 @@ KV manager V1 and disabled block reuse avoid retaining prefix-cache entries
 across this release. These settings are enforced by `app.py`.
 
 `TORCHINDUCTOR_COMPILE_THREADS=1` disables forked asynchronous compiler workers,
-which can inherit CUDA device mappings that prevent CRIU capture. Compilation
-still uses the configured compiler cache.
+which can inherit CUDA device mappings that prevent CRIU capture.
 
 After restore, the process recreates KV cache, calls `LLM.generate()` again,
 and starts an API on port 8000. It writes `trtllm-restore-ready` only after
@@ -79,11 +74,6 @@ to avoid RDMA mappings that CRIU cannot restore.
 The source and restore pods must use the same immutable image and mount the
 Snapshot control volume at `/snapshot-control`.
 
-The capture and restore manifests mount a [persistent compiler cache](compiler-cache.md).
-Use a ReadWriteMany storage class, such as `vast` on nscale, and retain this PVC
-for every checkpoint that uses it. Set `storageClassName` in
-`compiler-cache-pvc.yaml` when the default class does not provide RWX storage.
-
 ## 2. Create the app.py ConfigMap
 
 Set the namespace where the TensorRT-LLM pod will run, and create the
@@ -92,8 +82,6 @@ ConfigMap `capture/qwen3-0.6b.yaml` mounts `app.py` from:
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
 kubectl get namespace "$SNAPSHOT_NAMESPACE"
-
-kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename compiler-cache-pvc.yaml
 
 kubectl create configmap tensorrt-llm-app \
   --namespace "$SNAPSHOT_NAMESPACE" \
@@ -112,24 +100,24 @@ kubectl create configmap tensorrt-llm-app \
 
 ## 3. Deploy TensorRT-LLM
 
-Select a model supported by the chosen TensorRT-LLM image through
-`SNAPSHOT_MODEL` in [`capture/qwen3-0.6b.yaml`](tensorrt-llm/capture/qwen3-0.6b.yaml):
+The container argument in [`capture/qwen3-0.6b.yaml`](tensorrt-llm/capture/qwen3-0.6b.yaml)
+is a JSON object of `LLM` keyword arguments. Select a model supported by the
+chosen TensorRT-LLM image there:
 
 ```yaml
 containers:
   - name: main
-    env:
-      - name: SNAPSHOT_MODEL
-        value: Qwen/Qwen3-0.6B
+    args:
+      - '{"model": "Qwen/Qwen3-0.6B"}'
 ```
 
 The example uses one GPU, the PyTorch backend, and a maximum sequence length of
 512 tokens. Engine sizing is set through `TRTLLM_MAX_NUM_TOKENS` (default
 `1024`), `TRTLLM_MAX_BATCH_SIZE` (default `1`), and
 `TRTLLM_FREE_GPU_MEMORY_FRACTION` (default `0.10`). `app.py` sets
-`trust_remote_code=False`; Qwen3 needs no custom model code. Set additional
-`LLM` keyword arguments, including `trust_remote_code`, through the
-`TRTLLM_ENGINE_ARGS` JSON object. Revalidate checkpoint and restore before changing the model,
+`trust_remote_code=False`; Qwen3 needs no custom model code. Add other `LLM`
+keyword arguments, such as `trust_remote_code` or `tensor_parallel_size`, to the
+same JSON object. Revalidate checkpoint and restore before changing the model,
 TensorRT-LLM image, GPU count, backend, or engine settings.
 
 The eight-GPU GLM-5.3 profiles explicitly select `allreduce_strategy="NCCL"`.
@@ -139,8 +127,8 @@ and resume, and three restored inference checks on the same eight B200 GPUs.
 
 > [!NOTE]
 > This example runs TensorRT-LLM through the `LLM` API rather than `trtllm-serve`,
-> so the standard `trtllm-serve` command-line arguments do not apply. The model is
-> selected with `SNAPSHOT_MODEL`, and other engine settings are configured on the
+> so the standard `trtllm-serve` command-line arguments do not apply. Engine keyword
+> arguments come from the JSON argument and are passed to the
 > [`LLM` API](https://nvidia.github.io/TensorRT-LLM/llm-api/reference.html) in
 > `app.py`.
 

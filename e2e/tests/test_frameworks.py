@@ -145,7 +145,8 @@ def test_framework_checkpoint_restore_serves_inference(
             snap.ensure_pv(pv)
             snap.ensure_pvc(pvc)
         else:
-            for guide_pvc in fw.cache_pvcs(config=config, spec=framework):
+            guide_pvc = fw.model_cache_pvc(config=config, spec=framework)
+            if guide_pvc is not None:
                 snap.ensure_pvc(guide_pvc)
 
         k8s.apply_configmap(config.namespace, fw.app_configmap(config=config, spec=framework))
@@ -167,16 +168,12 @@ def test_framework_checkpoint_restore_serves_inference(
         source_libraries = (
             fw.cuinterpose_library_hashes(config, source) if shared_memory == "enabled" else None
         )
-        prompts = inference.chat_prompts(config.namespace, run.source_pod)
         source_main = next(c for c in source.spec.containers if c.name == frameworks.CONTAINER)
-        parallelism_env = (
-            "SGLANG_TENSOR_PARALLEL_SIZE" if framework.name == "sglang"
-            else "SNAPSHOT_TENSOR_PARALLEL_SIZE"
-        )
-        parallelism = next((e.value for e in source_main.env if e.name == parallelism_env), "1")
+        model, revision, parallelism = frameworks.guide_model(source_main.args)
+        prompts = inference.chat_prompts(config.namespace, run.source_pod, model, revision)
         result.update_environment(comparisonDimensions={
             "cudaSharedMemorySupport": shared_memory or "disabled",
-            "tensorParallelSize": int(parallelism),
+            "tensorParallelSize": parallelism,
         })
         result.redact(source_node, "source-node")
         result.mark_event("source.ready")

@@ -113,9 +113,8 @@ spec:
           command:
             - python3
             - /snapshot-app/app.py
-          env:
-            - name: SNAPSHOT_MODEL
-              value: Qwen/Qwen3-0.6B
+          args:
+            - '{"model": "Qwen/Qwen3-0.6B"}'
           resources:
             limits:
               nvidia.com/gpu: "1"

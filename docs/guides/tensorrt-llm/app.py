@@ -4,6 +4,7 @@
 import gc
 import json
 import os
+import sys
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -15,8 +16,6 @@ os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 from tensorrt_llm import LLM, SamplingParams
 
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
-MODEL = os.environ["SNAPSHOT_MODEL"]
-TENSOR_PARALLEL_SIZE = int(os.environ.get("SNAPSHOT_TENSOR_PARALLEL_SIZE", "1"))
 # Small default sizing so the example fits alongside other GPU tenants and
 # keeps the checkpoint artifact small. Override through the Pod template.
 MAX_NUM_TOKENS = int(os.environ.get("TRTLLM_MAX_NUM_TOKENS", "1024"))
@@ -85,11 +84,9 @@ def main() -> None:
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
     engine_args = {
-        "model": MODEL,
         "backend": "pytorch",
         "dtype": "auto",
         "trust_remote_code": TRUST_REMOTE_CODE,
-        "tensor_parallel_size": TENSOR_PARALLEL_SIZE,
         "max_num_tokens": MAX_NUM_TOKENS,
         "max_seq_len": 512,
         "max_batch_size": MAX_BATCH_SIZE,
@@ -97,7 +94,7 @@ def main() -> None:
         "kv_cache_config": {"free_gpu_memory_fraction": FREE_GPU_MEMORY_FRACTION},
     }
     # JSON keys are LLM API keyword arguments, not CLI flags.
-    engine_args.update(json.loads(os.environ.get("TRTLLM_ENGINE_ARGS", "{}")))
+    engine_args.update(json.loads(sys.argv[1]))
     revision = engine_args.pop("revision", None)
     if revision is not None:
         from huggingface_hub import snapshot_download

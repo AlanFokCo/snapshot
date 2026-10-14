@@ -64,15 +64,8 @@ def pods(spec: frameworks.FrameworkSpec) -> tuple[dict, dict, workloads.TestRun]
 @pytest.mark.workload
 def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec) -> None:
     source, restore, _ = pods(spec)
-    cache_claims = {pvc["metadata"]["name"] for pvc in fw.cache_pvcs(config=CONFIG, spec=spec)}
-    source_cache_mounts = [
-        mount for mount in fw.main_container(source)["volumeMounts"]
-        if mount["name"] == "compiler-cache"
-    ]
-    assert source_cache_mounts == [
-        mount for mount in fw.main_container(restore)["volumeMounts"]
-        if mount["name"] == "compiler-cache"
-    ]
+    guide_pvc = fw.model_cache_pvc(config=CONFIG, spec=spec)
+    cache_claims = {guide_pvc["metadata"]["name"]} if guide_pvc else set()
     assert fw.env_value(fw.main_container(restore), "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
     for pod in (source, restore):
         pod_spec = pod["spec"]
@@ -176,12 +169,13 @@ def test_restore_pod_is_standby_placeholder_for_this_run(spec: frameworks.Framew
 @pytest.mark.workload
 def test_guide_deploys_the_expected_model(spec: frameworks.FrameworkSpec) -> None:
     source, restore, _ = pods(spec)
+    assert frameworks.guide_model(fw.main_container(source)["args"])[0] == spec.model
+    for container in source["spec"].get("initContainers", []):
+        if container["name"] == fw.GUIDE_CACHE_INIT_CONTAINER:
+            assert container["args"][1] == spec.model
     for pod in (source, restore):
         for container in pod["spec"].get("initContainers", []) + pod["spec"]["containers"]:
-            model = fw.env_value(container, "SNAPSHOT_MODEL")
-            if model is not None:
-                assert model == spec.model, f"{container['name']} deploys {model}"
-    assert fw.env_value(fw.main_container(source), "SNAPSHOT_MODEL") == spec.model
+            assert fw.env_value(container, "SNAPSHOT_MODEL") is None
 
 
 @pytest.mark.workload
@@ -230,9 +224,6 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
         )
         volumes = {v["name"]: v for v in pod_spec["volumes"]}
         assert volumes[frameworks.MODEL_CACHE_VOLUME]["persistentVolumeClaim"] == {
-            "claimName": CACHE.pvc_name
-        }
-        assert volumes["compiler-cache"]["persistentVolumeClaim"] == {
             "claimName": CACHE.pvc_name
         }
         # The guide's own claim (SGLang's sglang-model-cache) must not linger.
@@ -288,7 +279,9 @@ def test_multi_gpu_recipe_preserves_capture_restore_contract(
     assert source["metadata"]["annotations"][fw.SHARED_MEMORY_ANNOTATION] == "enabled"
     installer = next(c for c in source["spec"]["initContainers"] if c["name"] == "snapshot-cuda-install")
     assert installer["image"] == AGENT_IMAGE
-    assert fw.env_value(fw.main_container(source), "SNAPSHOT_MODEL") == spec.model
+    model, revision, parallelism = frameworks.guide_model(fw.main_container(source)["args"])
+    assert (model, parallelism) == (spec.model, 8)
+    assert revision
     for pod in (source, restore):
         main = fw.main_container(pod)
         assert main["image"] == IMAGE

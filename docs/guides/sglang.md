@@ -14,16 +14,12 @@ Download [`app.py`](sglang/app.py),
 [`model-cache-pvc.yaml`](sglang/model-cache-pvc.yaml),
 [`capture/qwen3-0.6b.yaml`](sglang/capture/qwen3-0.6b.yaml), and
 [`restore/single-gpu.yaml`](sglang/restore/single-gpu.yaml) from the
-repository, along with the [compiler-cache PVC](compiler-cache-pvc.yaml):
+repository:
 
 ```bash
 mkdir -p sglang-snapshot
 cd sglang-snapshot
 mkdir -p capture restore
-
-curl --fail --location \
-  --output compiler-cache-pvc.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/compiler-cache-pvc.yaml
 
 curl --fail --location \
   --output app.py \
@@ -72,11 +68,6 @@ The source and restore pods must use the same immutable image, mount the
 Snapshot control volume at `/snapshot-control`, and mount the same model cache
 at `/hf-cache`.
 
-The capture and restore manifests mount a [persistent compiler cache](compiler-cache.md).
-Use a ReadWriteMany storage class, such as `vast` on nscale, and retain this PVC
-for every checkpoint that uses it. Set `storageClassName` in
-`compiler-cache-pvc.yaml` when the default class does not provide RWX storage.
-
 ## 2. Create the app.py ConfigMap
 
 Set the namespace where the SGLang pod will run, and create the ConfigMap
@@ -85,8 +76,6 @@ Set the namespace where the SGLang pod will run, and create the ConfigMap
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
 kubectl get namespace "$SNAPSHOT_NAMESPACE"
-
-kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename compiler-cache-pvc.yaml
 
 kubectl create configmap sglang-app \
   --namespace "$SNAPSHOT_NAMESPACE" \
@@ -105,34 +94,36 @@ kubectl create configmap sglang-app \
 
 ## 3. Deploy SGLang
 
-Select the model through `SNAPSHOT_MODEL` in [`capture/qwen3-0.6b.yaml`](sglang/capture/qwen3-0.6b.yaml).
-Both the init container and the main container carry the value:
+Select the model in [`capture/qwen3-0.6b.yaml`](sglang/capture/qwen3-0.6b.yaml).
+The init container downloads it, and the main container's last argument is a JSON
+object of `sglang.Engine` keyword arguments:
 
 ```yaml
 initContainers:
   - name: model-cache
-    env:
-      - name: SNAPSHOT_MODEL
-        value: Qwen/Qwen3-0.6B
+    args:
+      - <download script>
+      - Qwen/Qwen3-0.6B
 containers:
   - name: main
-    env:
-      - name: SNAPSHOT_MODEL
-        value: Qwen/Qwen3-0.6B
+    args:
+      - --mode
+      - snapshot
+      - '{"model_path": "Qwen/Qwen3-0.6B"}'
 ```
 
 The example configures a context length of 10240 tokens for a 24 GiB NVIDIA A10
 GPU. Reduce `SGLANG_CONTEXT_LENGTH` for a smaller GPU or increase it only after
 validating the resulting memory use. The KV cache page size is set through
-`SGLANG_PAGE_SIZE` (default `16`); the engine runs with `tp_size=1`.
+`SGLANG_PAGE_SIZE` (default `16`).
 `app.py` sets `trust_remote_code=False`; Qwen3 needs no custom model code.
-Set additional `sglang.Engine` keyword arguments, including `trust_remote_code`,
-through the `SGLANG_ENGINE_ARGS` JSON object.
+Add other `sglang.Engine` keyword arguments, such as `trust_remote_code` or
+`tp_size`, to the same JSON object.
 
 > [!NOTE]
 > This example runs SGLang directly through `sglang.Engine` rather than
 > `sglang.launch_server`, so the standard server's command-line arguments do not
-> apply. The model is selected with `SNAPSHOT_MODEL`, and other runtime settings
+> apply. Engine keyword arguments come from the JSON argument, and other runtime settings
 > are supplied through SGLang's [environment variables](https://docs.sglang.ai/references/environment_variables.html)
 > set in the Deployment's Pod template.
 

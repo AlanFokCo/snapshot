@@ -4,6 +4,7 @@
 import asyncio
 import json
 import os
+import sys
 import traceback
 from pathlib import Path
 from uuid import uuid4
@@ -23,7 +24,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
-MODEL = os.environ["SNAPSHOT_MODEL"]
 # Small single-GPU sizing so the example fits alongside other GPU tenants and
 # keeps the checkpoint artifact small. Override through the Pod template.
 MAX_MODEL_LEN = int(os.environ.get("VLLM_MAX_MODEL_LEN", "2048"))
@@ -93,15 +93,13 @@ async def main() -> None:
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
     engine_args = {
-        "model": MODEL,
-        "tensor_parallel_size": int(os.environ.get("SNAPSHOT_TENSOR_PARALLEL_SIZE", "1")),
         "enable_sleep_mode": True,
         "max_model_len": MAX_MODEL_LEN,
         "gpu_memory_utilization": GPU_MEMORY_UTILIZATION,
         "trust_remote_code": TRUST_REMOTE_CODE,
     }
     # JSON keys are AsyncEngineArgs API keyword arguments, not CLI flags.
-    engine_args.update(json.loads(os.environ.get("VLLM_ENGINE_ARGS", "{}")))
+    engine_args.update(json.loads(sys.argv[1]))
     engine = AsyncLLM.from_engine_args(
         AsyncEngineArgs(**engine_args),
         usage_context=UsageContext.LLM_CLASS,

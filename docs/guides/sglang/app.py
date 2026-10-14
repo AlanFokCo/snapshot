@@ -16,6 +16,8 @@ CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("prime", "snapshot"), default="snapshot")
+    # JSON keys are Engine API keyword arguments, not CLI flags.
+    parser.add_argument("engine_args", type=json.loads)
     return parser.parse_args()
 
 
@@ -31,24 +33,18 @@ def configure_capture_environment() -> None:
     )
 
 
-def create_engine(snapshot_mode: bool) -> Any:
+def create_engine(overrides: dict[str, Any], snapshot_mode: bool) -> Any:
     import sglang as sgl
 
     engine_args = {
-        "model_path": os.environ["SNAPSHOT_MODEL"],
         "context_length": int(os.environ.get("SGLANG_CONTEXT_LENGTH", "10240")),
         "page_size": int(os.environ.get("SGLANG_PAGE_SIZE", "16")),
-        "tp_size": int(os.environ.get("SGLANG_TENSOR_PARALLEL_SIZE", "1")),
-        "dp_size": int(os.environ.get("SGLANG_DATA_PARALLEL_SIZE", "1")),
-        "ep_size": int(os.environ.get("SGLANG_EXPERT_PARALLEL_SIZE", "1")),
-        "pp_size": int(os.environ.get("SGLANG_PIPELINE_PARALLEL_SIZE", "1")),
         "trust_remote_code": False,
         "enable_memory_saver": snapshot_mode,
         "enable_weights_cpu_backup": False,
         "log_level": "info",
     }
-    # JSON keys are Engine API keyword arguments, not CLI flags.
-    engine_args.update(json.loads(os.environ.get("SGLANG_ENGINE_ARGS", "{}")))
+    engine_args.update(overrides)
     return sgl.Engine(**engine_args)
 
 
@@ -128,7 +124,7 @@ def main() -> None:
         configure_capture_environment()
         CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
-    engine = create_engine(snapshot_mode)
+    engine = create_engine(args.engine_args, snapshot_mode)
     try:
         text = generate_text(engine, "The capital city of France is")
         print(f"SGLang pre-checkpoint output={text!r}", flush=True)
