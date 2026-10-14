@@ -25,7 +25,7 @@ AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfil
 # whatever the buildx builder defaults to.
 AGENT_PLATFORM ?= linux/amd64
 
-.PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
+.PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc verify-troubleshooting-steps check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
         capture-base-packages verify-base-packages \
         linux-build linux-test pagebroker-check-generated cpu-e2e
@@ -96,7 +96,7 @@ verify-crds:
 # install-tools makes controller-gen/golangci-lint/addlicense/helm available to
 # the stages before they run. govulncheck + helm-lint are read-only, so they run
 # after the mutating stages and before the clean-tree assert.
-check: verify-crds install-tools generate pagebroker-check-generated add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint verify-toc
+check: verify-crds install-tools generate pagebroker-check-generated add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint verify-toc verify-troubleshooting-steps
 	@test -z "$$(git status --porcelain)" || \
 	  (echo "ERROR: tree dirty after check — commit the changes below"; git status --porcelain; git diff; exit 1)
 
@@ -121,6 +121,11 @@ update-toc: $(MDTOC)
 
 verify-toc: $(MDTOC)
 	@sh hack/verify-toc.sh
+
+# Each step the agent can name in a checkpoint or restore failure has a
+# troubleshooting entry; the list is read from agent/internal/executor/step.go.
+verify-troubleshooting-steps:
+	@sh hack/verify-troubleshooting-steps.sh
 
 # Run build/test inside a Linux container (local dev only; CI runs on Linux natively).
 linux-build:
