@@ -61,7 +61,7 @@ future stores be added with minimal changes to workload APIs.
 ### Non-Goals
 
 - Storage classes, simultaneous stores, automatic fallback or artifact migration.
-- Direct (unstaged) restore from S3, new feature-discovery APIs or
+- Direct (unstaged) restore of bound content on any backend, new feature-discovery APIs or
   workload-identity implementation.
 - Moving CRIU/process orchestration into PageBroker or redesigning CUDA execution.
 - Cross-component operation leases and generation fencing in Stage 1; those are
@@ -125,7 +125,7 @@ sequenceDiagram
     participant PB as Node PageBroker
     participant S3 as S3-compatible store
     participant API as Kubernetes API
-    Agent->>API: Read of content (store binding, not deleting)
+    Agent->>Agent: Read content from informer cache (store binding, not deleting)
     Agent->>PB: Prepare(storeID, artifactUID, container)
     PB->>S3: Preflight destination access
     PB-->>Agent: Transaction opened
@@ -295,12 +295,17 @@ The operator sets `spec.storage.storeID` when it creates the `PodSnapshotContent
 The whole spec is immutable, so the binding can never be added or changed
 afterwards. A `PodSnapshotContent` represents one capture attempt, so its immutable
 UID already distinguishes a new attempt from a retry of the same attempt. Each
-container's index records `storeID`, `artifactUID` and `containerName`; no further
-Kubernetes API field is needed. A worked example is under
+container's S3 index records `storeID`, `artifactUID` and `containerName`; no
+further Kubernetes API field is needed. A worked example is under
 [Publication and artifact format](#publication-and-artifact-format).
 
+Two CRD validation rules tie the status block to the binding: `status.storage`
+requires `spec.storage`, and every `status.storage.artifacts[].containerName` must
+be one of `spec.source.podRef.containers`. The list is a map keyed by
+`containerName`, so a container has at most one descriptor.
+
 A store is the single storage configuration of the installation, defined in Helm
-and rendered into the storage ConfigMap described under
+and rendered into `storage.yaml` in the configuration ConfigMap described under
 [Configuration](#configuration). It is not a Kubernetes resource in Stage 1.
 
 Compute `storeID` as `store-v1-` + SHA-256 of a versioned, fixed-field canonical
@@ -319,20 +324,31 @@ length followed by its UTF-8 bytes, version tag first; `storeID` is `store-v1-`
 followed by the lowercase hex SHA-256 of those bytes. The shared Go/C++ vectors live
 in `api/storage/testdata/identity.json`.
 
-`storeID` is the identity of the physical location, not only a guard against
-configuration changes. It keys the artifact prefix in the bucket, it is recorded in
-every index, and it scopes maintenance so a worker can never delete under a different
-store. A reference to a configuration object cannot replace it: the object can be
-edited to point elsewhere, and the digest is what detects that. When a storage CRD
-introduces multiple stores, content gains a `storeRef` beside `storeID`; the
-reference says where to resolve, the digest says what was resolved.
+Worked S3 example. For the configuration shown under
+[Configuration](#configuration), the empty endpoint resolves to
+`https://s3.us-east-1.amazonaws.com` and the preimage is, in order:
 
-These fields are raw identity inputs. The S3 store prefix used in artifact keys
-additionally appends installation/store identifiers derived from Helm; those values
-are not fed back into the SHA-256. Operator, PageBroker and maintenance share one
-Go/C++ fixture set covering default and non-default ports, rejected paths, regions,
-addressing modes and prefixes, and must produce identical digests and effective
-artifact prefixes.
+```text
+"snapshot.store/v1", "s3", "https://s3.us-east-1.amazonaws.com", "us-east-1", "checkpoint-bucket", "snapshots"
+storeID = store-v1-fa5448e4870e1058af946de52383baa7dacfd92dfe74f70c821d87a734b349d9
+```
+
+`storeID` is the complete identity of the physical location, not only a guard
+against configuration changes. The store prefix in the bucket is exactly the
+configured `prefix`; nothing outside the hashed fields contributes to an object key,
+so two configurations with the same `storeID` address the same objects. It is
+recorded in every S3 index, and it scopes maintenance so a worker can never delete
+under a different store. A reference to a configuration object cannot replace it:
+the object can be edited to point elsewhere, and the digest is what detects that.
+When a storage CRD introduces multiple stores, content gains a `storeRef` beside
+`storeID`; the reference says where to resolve, the digest says what was resolved.
+An installation that needs its own namespace in a shared bucket uses its own
+`prefix`.
+
+Operator, PageBroker and maintenance share one Go/C++ fixture set covering default
+and non-default ports, rejected paths, regions, addressing modes and prefixes, and
+must produce identical digests. Only PVC vectors exist until the S3 backend lands;
+the example above is the first S3 vector.
 
 `PodSnapshot` and `SnapshotJob` retain their current workload request APIs. Later
 storage-class selection can bind the same content fields without changing restore
@@ -402,9 +418,11 @@ What changes for S3, and why:
   container and sets Ready only when every required container is confirmed. The
   identity lookup in `GetArtifactMetadata` exists only to recover that descriptor
   after a lost reply or a restart; restores always use the persisted descriptor.
-- **Staged restore only.** Direct restore mounts a local checkpoint directory,
-  which S3 does not have. The agent derives the mode from the bound store's
-  backend: PVC keeps the configured mode, S3 always stages.
+- **Staged restore only.** Every artifact-addressed restore is staged, on PVC as
+  well as S3: the protocol has no direct restore by descriptor, and direct restore
+  would need the agent to mount the store itself. `pageBroker.restoreMode` applies
+  only to legacy content restored through the filesystem selector. Direct restore
+  of bound PVC content is a separate decision after the PVC qualification gate.
 - **Cleanup separate from success.** Unmount before `Commit`; if unmount fails,
   report the restore result unchanged, skip `Commit` and let transaction expiry
   reclaim staging. Never rerun a restore to retry cleanup.
@@ -567,9 +585,9 @@ Neither component requires Kubernetes Secret-read permission or a Pod restart.
 Use verified TLS and an optional custom CA. Scope storage permissions to the
 configured store, restrict local sockets/staging, and exclude secrets from logs
 and status. Maintenance checks artifact UID, store binding and fresh ownership
-before deletion; protect against arbitrary paths and symlinks. Grant the
-operator's service account only the storage permissions needed for cleanup and
-metadata repair, without GPU or host-process access.
+before deletion; protect against arbitrary paths and symlinks. The operator's
+service account gets no GPU or host-process access; its storage rights come only
+from the maintenance credential Secret.
 
 ### Configuration
 
@@ -607,10 +625,11 @@ storage:
       caBundleConfigMapRef: ""   # Optional custom CA
 ```
 
-The chart renders the non-secret part into the storage ConfigMap, which the
-operator and PageBroker decode into the shared `api/storage` configuration. The
-populated block selects the backend; two blocks or none is a configuration error.
-The chart's existing `storage.type` key only picks which block to render:
+The chart renders the identity part into `storage.yaml` in the configuration
+ConfigMap, which the operator and PageBroker decode into the shared `api/storage`
+configuration. The populated block selects the backend; two blocks or none is a
+configuration error, and there is no discriminator key. The chart's existing
+`storage.type` key only picks which block to render:
 
 ```go
 type Config struct {
@@ -630,15 +649,28 @@ type S3 struct {
 
 `addressingMode` is a client setting, not part of `storeID`. When omitted it
 defaults to `virtual-host` if `endpoint` is empty and `path` otherwise; the chart
-schema and both components apply the same rule. Credentials are not part of this
-struct; they come from the projected Secret files.
+schema and both components apply the same rule. Nothing else goes in this file:
+no derived `storeID`, no credentials, no CA path, no limits.
 
-- Render non-secret settings into the existing configuration ConfigMap, mounted
-  into both node PageBroker and the operator manager.
+Settings reach PageBroker and the operator manager through three channels, by
+kind:
+
+| Kind | Channel | PageBroker | Operator manager |
+| --- | --- | --- | --- |
+| Store identity | `storage.yaml`, mounted read-only at `/etc/snapshot/storage.yaml` | `--storage-config` | `--snapshot-storage-config` |
+| Credentials | Secret projected without `subPath` at `/etc/snapshot/s3-credentials/credentials` | `--s3-credentials-file` | same path, maintenance client |
+| Custom CA | ConfigMap from `tls.caBundleConfigMapRef` projected at `/etc/snapshot/s3-ca/ca.pem` | `--s3-ca-file`; absent means system trust | same |
+| Resource and transfer limits | Command-line flags rendered from `pageBroker.*` Helm values, like the existing `--max-concurrent-requests` | `--s3-upload-part-bytes`, `--s3-upload-buffer-bytes`, `--staging-bytes`, `--transaction-lifetime` | worker pool size, per-task timeout, retry backoff |
+
+The chart owns the defaults; each component validates ranges and refuses to start
+on an invalid value. Plain HTTP is not configurable. No environment variable is part
+of the contract: if an SDK needs one internally, the component sets it from the
+flag. `--transaction-lifetime` keeps the semantics under
+[PageBroker: internal API](#pagebroker-internal-api): it starts at successful
+Prepare, retries never extend it, and every SDK request deadline is bounded by it.
+
 - In S3 mode, omit checkpoint PVC mounts on the agent; preserve node staging. In
   PVC mode, the operator manager mounts the shared claim directly.
-- Configure the maintenance worker pool size, per-task timeout and retry backoff on
-  the operator manager itself.
 - Match Snapshot/PageBroker image versions. PageBroker reads mounted configuration
   and has no Kubernetes client.
 
@@ -647,11 +679,50 @@ struct; they come from the projected Secret files.
 #### Publication and artifact format
 
 Store the existing per-container bundle under
-`<store-prefix>/artifacts/<artifactUID>/containers/<name>/`; the store prefix includes
-the configured prefix and installation/store identifiers. Upload immutable payloads,
-then publish the index last. The index carries its own layout version, binds
-store/artifact/container, and lists file/directory paths, permissions, sizes and
-file SHA-256 digests.
+`<prefix>/artifacts/<artifactUID>/containers/<name>/`, where `<prefix>` is the
+configured S3 prefix and nothing else. Upload immutable payloads under `data/`, then
+publish the index last. For the example configuration and content UID
+`7f3a9c2e-1d4b-4e8f-9a6c-2b5d8e1f0a37`, container `main`, the keys in
+`checkpoint-bucket` are:
+
+```text
+snapshots/artifacts/7f3a9c2e-1d4b-4e8f-9a6c-2b5d8e1f0a37/containers/main/index.json
+snapshots/artifacts/7f3a9c2e-1d4b-4e8f-9a6c-2b5d8e1f0a37/containers/main/data/<relative-path>
+```
+
+The index is a contract between PageBroker, which writes and reads it, and
+maintenance, which inspects it. One object per publication:
+
+```json
+{
+  "format": "snapshot.s3-checkpoint/v1",
+  "storeID": "store-v1-fa5448e4870e1058af946de52383baa7dacfd92dfe74f70c821d87a734b349d9",
+  "artifactUID": "7f3a9c2e-1d4b-4e8f-9a6c-2b5d8e1f0a37",
+  "containerName": "main",
+  "rootMode": 448,
+  "directories": [
+    { "path": "criu", "mode": 448 }
+  ],
+  "files": [
+    { "path": "criu/pages-1.img", "mode": 384, "size": 1073741824, "sha256": "<64 lowercase hex>" },
+    { "path": "manifest.yaml", "mode": 384, "size": 2048, "sha256": "<64 lowercase hex>" }
+  ]
+}
+```
+
+- Exactly these top-level fields. An unknown or missing field, or an unknown
+  `format`, is `UNSUPPORTED_ARTIFACT`.
+- `storeID`, `artifactUID` and `containerName` must equal the caller's binding and
+  the key the index was read from; a mismatch is `STORE_MISMATCH` or
+  `ARTIFACT_CORRUPT` before any payload download.
+- `path` is relative to the publication root and names the object at
+  `data/<path>`; it is safe (no absolute, `..` or empty components), valid UTF-8,
+  at most 512 bytes, unique, sorted, and its parent directory is listed first.
+  `mode` is the nine permission bits as a decimal integer, at most `0777`.
+- Limits: index at most 4 MiB, at most 10 000 entries, total `size` at most 1 TiB,
+  `manifest.yaml` present with 1 byte to 1 MiB.
+- Maintenance reads only `format`, the three identity fields and `files[].path`.
+
 Reject unsafe paths, unsupported formats, missing files and checksum mismatches.
 
 The index lives at a fixed key, `containers/<name>/index.json`, so there is exactly
@@ -661,13 +732,22 @@ writing. Since a new capture attempt receives a new `artifactUID`, retries and
 restarts of one attempt land on the same key while a new attempt cannot adopt an
 old publication.
 
-Each index records the `storeID`, `artifactUID` and container name it was
+Each S3 index records the `storeID`, `artifactUID` and container name it was
 published for. A retried `Commit` and every restore compare those three fields with
 the caller's binding and refuse the index on any mismatch, which catches a bundle
 copied between stores or prefixes and any mismatch between the key and the body.
 Every component already holds those values, so no new API field is needed.
 `storeID` is the only derived identity; its encoding is defined under
 [Kubernetes API and operator](#kubernetes-api-and-operator).
+
+A PVC publication has no index: the directory is the publication and its relative
+path is the handle. The fixed path still holds exactly one publication per content
+and container, so a target that is already published or still being published is
+refused at Prepare and again at Commit with `TRANSACTION_CONFLICT` and left
+untouched, and a retried `Commit` on the same transaction returns the same
+`PublishedArtifact` without publishing again. The store binding is checked against
+the configured `storeID` on every PVC request; there is no per-publication identity
+to compare beyond the path.
 
 Worked example. Content `psc-7f3a` is created bound to store `store-v1-9c1e…`; its
 UID is the artifact UID and the pod has one container, `main`.
@@ -751,8 +831,9 @@ backend integration with a disposable S3-compatible service, and GPU end-to-end 
   index refusal on identity mismatch, identical Go/C++
   store-ID results for endpoint/region/prefix variants, flipping `addressingMode`
   leaves `storeID` unchanged and old content restorable, and legacy PVC.
-- **Restore mode:** S3 restore with `restoreMode: direct` configured still takes
-  the staged path; PVC restore keeps the configured mode.
+- **Restore mode:** every bound restore takes the staged path on both backends,
+  whatever `restoreMode` is configured; legacy unbound PVC restore keeps the
+  configured mode.
 - **Helm/security:** S3 installation without checkpoint PVC; credentials only in
   PageBroker/operator manager; matching images and an operator service account
   without GPU/host mounts. Rotate and revoke credentials while already-running Go
