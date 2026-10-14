@@ -234,11 +234,11 @@ func podSnapshotTemplateMetadata(sj *snapshotv1alpha1.SnapshotJob) (map[string]s
 	}
 	labels[snapshotv1alpha1.SnapshotJobOwnerLabel] = sj.Name
 	labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
-	if helpers, present := sj.Spec.PodTemplate.Annotations[podcontract.HelperArtifactContainersAnnotation]; present {
+	if nonTargets, present := sj.Spec.PodTemplate.Annotations[podcontract.NonTargetArtifactContainersAnnotation]; present {
 		if annotations == nil {
 			annotations = make(map[string]string)
 		}
-		annotations[podcontract.HelperArtifactContainersAnnotation] = helpers
+		annotations[podcontract.NonTargetArtifactContainersAnnotation] = nonTargets
 	}
 	return labels, annotations, nil
 }

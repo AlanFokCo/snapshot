@@ -34,7 +34,7 @@ import (
 
 // Exercise the real aggregate reconciler and a newly started maintenance
 // runnable, modeling a crash after Failed was persisted but before rollback.
-func TestPublishedHelperArtifactCaptureFailureAndMaintenanceRestart(t *testing.T) {
+func TestPublishedNonTargetArtifactCaptureFailureAndMaintenanceRestart(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		policy  snapshotv1alpha1.SnapshotJobOnFailurePolicy
@@ -42,15 +42,15 @@ func TestPublishedHelperArtifactCaptureFailureAndMaintenanceRestart(t *testing.T
 	}{
 		{"omitted retains", "", false},
 		{"explicit retain", snapshotv1alpha1.SnapshotJobOnFailureRetain, false},
-		{"explicit cleanup", snapshotv1alpha1.SnapshotJobOnFailureCleanupHelpers, true},
+		{"explicit cleanup", snapshotv1alpha1.SnapshotJobOnFailureCleanupNonTargetArtifacts, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			testPublishedHelperFailureAndRestart(t, tc.policy, tc.cleanup)
+			testPublishedNonTargetFailureAndRestart(t, tc.policy, tc.cleanup)
 		})
 	}
 }
 
-func testPublishedHelperFailureAndRestart(t *testing.T, policy snapshotv1alpha1.SnapshotJobOnFailurePolicy, cleanup bool) {
+func testPublishedNonTargetFailureAndRestart(t *testing.T, policy snapshotv1alpha1.SnapshotJobOnFailurePolicy, cleanup bool) {
 	t.Helper()
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -62,7 +62,7 @@ func testPublishedHelperFailureAndRestart(t *testing.T, policy snapshotv1alpha1.
 		Spec: snapshotv1alpha1.SnapshotJobSpec{
 			OnFailurePolicy: policy,
 			PodTemplate: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{podcontract.HelperArtifactContainersAnnotation: "saver"}},
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{podcontract.NonTargetArtifactContainersAnnotation: "saver"}},
 				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "worker"}, {Name: "saver"}}},
 			},
 			PodSnapshotTemplate: snapshotv1alpha1.PodSnapshotTemplate{TargetContainers: []string{"worker"}},
@@ -91,6 +91,16 @@ func testPublishedHelperFailureAndRestart(t *testing.T, policy snapshotv1alpha1.
 				}
 				if metadata, ok := list.(*metav1.PartialObjectMetadataList); ok {
 					// Fake clients lack metadata-only server list resourceVersions.
+					if metadata.GroupVersionKind().Kind == "SnapshotJobList" {
+						sweepReads.Add(1)
+						jobs := &snapshotv1alpha1.SnapshotJobList{}
+						if err := c.List(ctx, jobs, opts...); err != nil {
+							return err
+						}
+						for i := range jobs.Items {
+							metadata.Items = append(metadata.Items, metav1.PartialObjectMetadata{ObjectMeta: jobs.Items[i].ObjectMeta})
+						}
+					}
 					metadata.ResourceVersion = "1"
 					return nil
 				}
@@ -115,14 +125,14 @@ func testPublishedHelperFailureAndRestart(t *testing.T, policy snapshotv1alpha1.
 	_, err = r.Reconcile(ctx, req) // creates and records the PodSnapshot
 	require.NoError(t, err)
 	base := t.TempDir()
-	root := filepath.Join(base, podcontract.HelperArtifactsDirectory, string(sj.UID))
+	root := filepath.Join(base, podcontract.NonTargetArtifactsDirectory, string(sj.UID))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "gms", "device-0"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "gms", "device-0", "manifest.json"), []byte("published"), 0o600))
 
 	snap := &snapshotv1alpha1.PodSnapshot{}
 	require.NoError(t, cl.Get(ctx, req.NamespacedName, snap))
 	snap.Status.Conditions = []metav1.Condition{{Type: snapshotv1alpha1.PodSnapshotConditionFailed,
-		Status: metav1.ConditionTrue, Reason: "CRIUDumpFailed", Message: "capture failed after helper published"}}
+		Status: metav1.ConditionTrue, Reason: "CRIUDumpFailed", Message: "capture failed after non-target artifact published"}}
 	require.NoError(t, cl.Status().Update(ctx, snap))
 	_, err = r.Reconcile(ctx, req) // persist aggregate Failed before rollback
 	require.NoError(t, err)
@@ -145,7 +155,7 @@ func testPublishedHelperFailureAndRestart(t *testing.T, policy snapshotv1alpha1.
 	require.NoError(t, cl.Create(ctx, completed))
 	completed.Status.Conditions = []metav1.Condition{{Type: snapshotv1alpha1.SnapshotJobConditionCompleted, Status: metav1.ConditionTrue}}
 	require.NoError(t, cl.Status().Update(ctx, completed))
-	otherRoot := filepath.Join(base, podcontract.HelperArtifactsDirectory, string(completed.UID))
+	otherRoot := filepath.Join(base, podcontract.NonTargetArtifactsDirectory, string(completed.UID))
 	require.NoError(t, os.MkdirAll(otherRoot, 0o750))
 	q, err := maintenance.NewQueue(ctx, cl, cl, recorder, operatortypes.ArtifactCleanupConfig{
 		BasePath: base, ScanInterval: 20 * time.Millisecond, BatchSize: 10, ListAttempts: 3, Workers: 1, TaskTimeout: time.Minute, BackendType: backends.NamePVC,
@@ -163,7 +173,7 @@ func testPublishedHelperFailureAndRestart(t *testing.T, policy snapshotv1alpha1.
 		require.Eventually(t, func() bool { return podReads.Load() > readsBeforeRestart }, 5*time.Second, 10*time.Millisecond,
 			"explicit cleanup must inspect the retained writer")
 	}
-	require.DirExists(t, root, "Failed and JobFailed must not delete a helper that is still writing")
+	require.DirExists(t, root, "Failed and JobFailed must not delete a non-target container that is still writing")
 	pod.Status.Phase = corev1.PodFailed
 	pod.Status.ContainerStatuses[1].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}
 	require.NoError(t, cl.Status().Update(ctx, pod))
@@ -186,7 +196,7 @@ func testPublishedHelperFailureAndRestart(t *testing.T, policy snapshotv1alpha1.
 	require.True(t, snapshotv1alpha1.IsSnapshotJobFailed(failed))
 	var reclaimed bool
 	for len(recorder.Events) > 0 {
-		if strings.Contains(<-recorder.Events, "HelperArtifactsReclaimed") {
+		if strings.Contains(<-recorder.Events, "NonTargetArtifactsReclaimed") {
 			reclaimed = true
 		}
 	}

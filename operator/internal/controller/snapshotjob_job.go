@@ -51,7 +51,7 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 	}
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] = sj.Name
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
-	if err := injectHelperArtifactContract(podTemplate, targetContainer, string(sj.UID)); err != nil {
+	if err := injectNonTargetArtifactContract(podTemplate, targetContainer, string(sj.UID)); err != nil {
 		return nil, err
 	}
 
@@ -66,37 +66,37 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 	})
 }
 
-func injectHelperArtifactContract(template *corev1.PodTemplateSpec, target, uid string) error {
-	helpers, err := podcontract.HelperArtifactContainers(template.Annotations)
-	if err != nil || len(helpers) == 0 {
+func injectNonTargetArtifactContract(template *corev1.PodTemplateSpec, target, uid string) error {
+	nonTargets, err := podcontract.NonTargetArtifactContainers(template.Annotations)
+	if err != nil || len(nonTargets) == 0 {
 		return err
 	}
-	subdir, err := podcontract.HelperArtifactSubdir(uid)
+	subdir, err := podcontract.NonTargetArtifactSubdir(uid)
 	if err != nil {
 		return err
 	}
-	for _, name := range helpers {
+	for _, name := range nonTargets {
 		if name == target {
-			return fmt.Errorf("%s must not name capture target %q", podcontract.HelperArtifactContainersAnnotation, name)
+			return fmt.Errorf("%s must not name capture target %q", podcontract.NonTargetArtifactContainersAnnotation, name)
 		}
-		var helper *corev1.Container
+		var nonTarget *corev1.Container
 		for i := range template.Spec.Containers {
 			if template.Spec.Containers[i].Name == name {
-				helper = &template.Spec.Containers[i]
+				nonTarget = &template.Spec.Containers[i]
 				break
 			}
 		}
-		if helper == nil {
-			return fmt.Errorf("%s names missing regular helper container %q", podcontract.HelperArtifactContainersAnnotation, name)
+		if nonTarget == nil {
+			return fmt.Errorf("%s names missing regular non-target container %q", podcontract.NonTargetArtifactContainersAnnotation, name)
 		}
-		for _, env := range helper.Env {
-			if env.Name == podcontract.SnapshotJobUIDEnv || env.Name == podcontract.HelperArtifactSubdirEnv {
-				return fmt.Errorf("helper container %q sets controller-owned environment variable %s", name, env.Name)
+		for _, env := range nonTarget.Env {
+			if env.Name == podcontract.SnapshotJobUIDEnv || env.Name == podcontract.NonTargetArtifactSubdirEnv {
+				return fmt.Errorf("non-target container %q sets controller-owned environment variable %s", name, env.Name)
 			}
 		}
-		helper.Env = append(helper.Env,
+		nonTarget.Env = append(nonTarget.Env,
 			corev1.EnvVar{Name: podcontract.SnapshotJobUIDEnv, Value: uid},
-			corev1.EnvVar{Name: podcontract.HelperArtifactSubdirEnv, Value: subdir})
+			corev1.EnvVar{Name: podcontract.NonTargetArtifactSubdirEnv, Value: subdir})
 	}
 	return nil
 }

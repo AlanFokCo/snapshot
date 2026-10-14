@@ -52,20 +52,27 @@ func TestSnapshotJobFailurePolicyAdmissionAndCompatibility(t *testing.T) {
 	_, inserted := base["spec"].(map[string]any)["onFailurePolicy"]
 	require.False(t, inserted, "a new default must not rewrite existing immutable specs")
 	for _, tc := range []struct {
-		name   string
-		policy any
-		valid  bool
+		name      string
+		policy    any
+		annotated bool
+		valid     bool
 	}{
-		{"legacy omission", nil, true},
-		{"explicit retain", "Retain", true},
-		{"cleanup helpers", "CleanupHelpers", true},
-		{"unknown rejected", "Delete", false},
-		{"explicit empty rejected", "", false},
+		{"legacy omission", nil, false, true},
+		{"explicit retain", "Retain", false, true},
+		{"cleanup non-target artifacts", "CleanupNonTargetArtifacts", true, true},
+		{"previous policy name rejected", "CleanupHelpers", false, false},
+		{"unknown rejected", "Delete", false, false},
+		{"explicit empty rejected", "", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			obj := runtime.DeepCopyJSON(base)
 			if tc.policy != nil {
 				obj["spec"].(map[string]any)["onFailurePolicy"] = tc.policy
+			}
+			if tc.annotated {
+				obj["spec"].(map[string]any)["podTemplate"].(map[string]any)["metadata"] = map[string]any{
+					"annotations": map[string]any{"nvidia.com/snapshot-non-target-artifact-containers": "saver"},
+				}
 			}
 			structuralpruning.Prune(obj, structural, true)
 			structuraldefaulting.Default(obj, structural)
@@ -84,7 +91,17 @@ func TestSnapshotJobFailurePolicyAdmissionAndCompatibility(t *testing.T) {
 		})
 	}
 	optedIn := runtime.DeepCopyJSON(base)
-	optedIn["spec"].(map[string]any)["onFailurePolicy"] = "CleanupHelpers"
+	optedIn["spec"].(map[string]any)["onFailurePolicy"] = "CleanupNonTargetArtifacts"
+	missingAnnotationErrs, _ := cel.Validate(context.Background(), field.NewPath(""), structural, optedIn, nil, 10000000)
+	require.NotEmpty(t, missingAnnotationErrs, "cleanup without managed writers must be rejected at admission")
+	optedIn["spec"].(map[string]any)["podTemplate"].(map[string]any)["metadata"] = map[string]any{
+		"annotations": map[string]any{"nvidia.com/snapshot-non-target-artifact-containers": "   "},
+	}
+	blankAnnotationErrs, _ := cel.Validate(context.Background(), field.NewPath(""), structural, optedIn, nil, 10000000)
+	require.NotEmpty(t, blankAnnotationErrs, "cleanup with an empty writer declaration must be rejected at admission")
+	optedIn["spec"].(map[string]any)["podTemplate"].(map[string]any)["metadata"] = map[string]any{
+		"annotations": map[string]any{"nvidia.com/snapshot-non-target-artifact-containers": "saver"},
+	}
 	errs, _ := cel.Validate(context.Background(), field.NewPath(""), structural, optedIn, base, 10000000)
 	require.NotEmpty(t, errs, "an existing failed job cannot be retroactively opted in")
 	require.Contains(t, errs.ToAggregate().Error(), "spec is immutable")

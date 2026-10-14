@@ -74,14 +74,14 @@ spec:
                 type: integer
               onFailurePolicy:
                 description: |-
-                  OnFailurePolicy defaults to Retain when omitted. CleanupHelpers permits
-                  reclamation of this failed attempt's declared, UID-owned helper artifacts
+                  OnFailurePolicy defaults to Retain when omitted. CleanupNonTargetArtifacts permits
+                  reclamation of this failed attempt's declared, UID-owned non-target artifacts
                   only after every source writer stops. It never deletes capture artifacts,
                   source objects, or failure status. Like the rest of spec, it is immutable.
                   No server default is inserted into existing immutable specs.
                 enum:
                 - Retain
-                - CleanupHelpers
+                - CleanupNonTargetArtifacts
                 type: string
               podSnapshotTemplate:
                 description: |-
@@ -9008,6 +9008,13 @@ spec:
             - message: targetContainers must name containers present in podTemplate
               rule: self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x,
                 x.name))
+            - message: CleanupNonTargetArtifacts requires declared non-target artifact
+                containers in podTemplate.metadata.annotations
+              rule: '!has(self.onFailurePolicy) || self.onFailurePolicy != ''CleanupNonTargetArtifacts''
+                || (has(self.podTemplate.metadata) && has(self.podTemplate.metadata.annotations)
+                && ''nvidia.com/snapshot-non-target-artifact-containers'' in self.podTemplate.metadata.annotations
+                && self.podTemplate.metadata.annotations[''nvidia.com/snapshot-non-target-artifact-containers''].trim()
+                != '''')'
           status:
             description: SnapshotJobStatus defines the observed state of SnapshotJob.
             properties:

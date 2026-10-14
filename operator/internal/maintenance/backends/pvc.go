@@ -42,18 +42,18 @@ func (b *PVCBackend) Candidates(_ context.Context, logger logr.Logger) (map[stri
 	return enumerateSweepCandidates(b.basePath, logger)
 }
 
-// HelperCandidates enumerates only the reserved SnapshotJob helper namespace.
-func (b *PVCBackend) HelperCandidates(_ context.Context, logger logr.Logger) (map[string]struct{}, error) {
-	return enumerateOwnedRoots(b.basePath, podcontract.HelperArtifactsDirectory, logger)
+// NonTargetArtifactCandidates enumerates only the reserved SnapshotJob non-target artifact namespace.
+func (b *PVCBackend) NonTargetArtifactCandidates(_ context.Context, logger logr.Logger) (map[string]struct{}, error) {
+	return enumerateOwnedRoots(b.basePath, podcontract.NonTargetArtifactsDirectory, logger)
 }
 
-// DeleteHelpers removes the whole directory of one positively failed attempt.
+// DeleteNonTargetArtifacts removes the whole directory of one positively failed attempt.
 // The maintenance caller must first prove the writers have stopped.
-func (b *PVCBackend) DeleteHelpers(_ context.Context, jobUID string) error {
-	if _, err := podcontract.HelperArtifactSubdir(jobUID); err != nil {
+func (b *PVCBackend) DeleteNonTargetArtifacts(_ context.Context, jobUID string) error {
+	if _, err := podcontract.NonTargetArtifactSubdir(jobUID); err != nil {
 		return err
 	}
-	return removeOwnedRoot(b.basePath, podcontract.HelperArtifactsDirectory, jobUID)
+	return removeOwnedRoot(b.basePath, podcontract.NonTargetArtifactsDirectory, jobUID)
 }
 
 // removeArtifactRoot refuses non-ordinary (e.g. symlinked) directories.
@@ -77,8 +77,15 @@ func resolveOwnedRoot(basePath, directory, uid string) (string, string, error) {
 			return "", "", err
 		}
 		root = filepath.Join(basePath, directory)
+		if err := artifact.ValidateContainment(basePath, root); err != nil {
+			return "", "", err
+		}
 	}
-	return root, filepath.Join(root, uid), nil
+	owned := filepath.Join(root, uid)
+	if err := artifact.ValidateContainment(root, owned); err != nil {
+		return "", "", err
+	}
+	return root, owned, nil
 }
 
 func removeOwnedRoot(basePath, directory, uid string) error {
