@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "transfer/engine/model_streamer/model_streamer_restore.hpp"
+#include "transfer/s3/s3_storage_backend.hpp"
 #include "tests/temporary_directory.hpp"
 
 namespace snapshot::pagebroker {
@@ -77,7 +78,24 @@ class S3RoundTripTest : public ::testing::Test {
     return {bucket_, "roundtrip/" + scenario + "/" + name};
   }
 
+  S3Config Config() const
+  {
+    S3Config config;
+    config.transfer = {connection_, limits_, std::chrono::seconds(30)};
+    return config;
+  }
 
+  S3CheckpointUploadPlan UploadPlan(const Path& source, const std::string& scenario) const
+  {
+    S3CheckpointUploadPlan plan{source, {}};
+    for (const auto& entry : fs::recursive_directory_iterator(source)) {
+      if (entry.is_regular_file()) {
+        const auto relative = entry.path().lexically_relative(source);
+        plan.files.push_back({relative, Destination(scenario, relative.generic_string())});
+      }
+    }
+    return plan;
+  }
 
   Path SingleFileTree(const std::string& name, bool large = false)
   {
@@ -144,6 +162,56 @@ class S3RoundTripTest : public ::testing::Test {
   S3Limits limits_;
 };
 
+TEST_F(S3RoundTripTest, UploadsAndRestoresVerifiedTree)
+{
+  // Exercise the proposed production part size; the fixture crosses two parts.
+  limits_.part_size = 16 * 1024 * 1024;
+  S3StorageBackend storage(Config());
+  ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
+  const auto plan = storage.UploadCheckpoint(UploadPlan(fixture_, "tree"));
+  EXPECT_EQ(plan.root_permissions, fs::status(fixture_).permissions());
+  std::size_t source_count = 0;
+  for (const auto& entry : fs::recursive_directory_iterator(fixture_)) {
+    ++source_count;
+    const auto relative = entry.path().lexically_relative(fixture_);
+    if (entry.is_directory()) {
+      const auto directory = std::find_if(plan.directories.begin(), plan.directories.end(), [&](const auto& value) {
+        return value.relative_path == relative;
+      });
+      ASSERT_NE(directory, plan.directories.end());
+      EXPECT_EQ(directory->permissions, entry.status().permissions());
+    } else {
+      const auto file = std::find_if(plan.files.begin(), plan.files.end(), [&](const auto& value) {
+        return value.relative_path == relative;
+      });
+      ASSERT_NE(file, plan.files.end());
+      EXPECT_EQ(file->source_locator, "s3://" + bucket_ + "/roundtrip/tree/" + relative.generic_string());
+      EXPECT_EQ(file->size_bytes, entry.file_size());
+      EXPECT_EQ(file->expected_sha256, utils::ComputeFileSha256(entry.path()));
+      EXPECT_EQ(file->permissions, entry.status().permissions());
+    }
+  }
+  EXPECT_EQ(source_count, plan.directories.size() + plan.files.size());
+  EXPECT_TRUE(std::is_sorted(plan.directories.begin(), plan.directories.end(), [](const auto& a, const auto& b) {
+    return a.relative_path < b.relative_path;
+  }));
+  const auto destination = temporary_.path() / "tree";
+  restore_reader.Stage(plan, destination);
+  EXPECT_EQ(fs::status(destination).permissions(), plan.root_permissions);
+  std::size_t count = 0;
+  for ([[maybe_unused]] const auto& entry : fs::recursive_directory_iterator(destination))
+    ++count;
+  EXPECT_EQ(count, plan.directories.size() + plan.files.size());
+  for (const auto& directory : plan.directories) {
+    EXPECT_TRUE(fs::is_directory(destination / directory.relative_path));
+    EXPECT_EQ(fs::status(destination / directory.relative_path).permissions(), directory.permissions);
+  }
+  for (const auto& file : plan.files) {
+    EXPECT_EQ(fs::file_size(destination / file.relative_path), fs::file_size(fixture_ / file.relative_path));
+    EXPECT_EQ(utils::ComputeFileSha256(destination / file.relative_path), utils::ComputeFileSha256(fixture_ / file.relative_path));
+    EXPECT_EQ(fs::status(destination / file.relative_path).permissions(), file.permissions);
+  }
+}
 
 // Deliberately run cancellation after the synchronous request has finished.
 // This exercises the pinned SDK's ownership of queued tasks, including rejection.
@@ -318,8 +386,99 @@ TEST_F(S3RoundTripTest, HandlesMultipartThresholdAndExactParts)
   }
 }
 
+TEST_F(S3RoundTripTest, PreflightsEntireTreeBeforeAnyUpload)
+{
+  S3StorageBackend storage(Config());
+  const auto source = SingleFileTree("preflight-source");
+  std::ofstream(source / "last") << "last file";
+  const S3CheckpointUploadPlan valid{source, {{"data", Destination("preflight", "first")},
+                                             {"last", Destination("preflight", "last")}}};
+  for (const auto& path : std::vector<std::string>{"", ".", "..", "/absolute", "../escape", "a/../last",
+                                                 "a//last", "last/", std::string("last\0hidden", 11)}) {
+    auto invalid = valid;
+    invalid.files.back().relative_path = path;
+    EXPECT_THROW(storage.UploadCheckpoint(invalid), std::invalid_argument) << path;
+  }
+  auto invalid = valid;
+  invalid.files.pop_back();
+  EXPECT_THROW(storage.UploadCheckpoint(invalid), std::invalid_argument);
+  invalid = valid;
+  invalid.files.push_back({"extra", Destination("preflight", "extra")});
+  EXPECT_THROW(storage.UploadCheckpoint(invalid), std::invalid_argument);
+  invalid = valid;
+  invalid.files.back().relative_path = "data";
+  EXPECT_THROW(storage.UploadCheckpoint(invalid), std::invalid_argument);
+  invalid = valid;
+  invalid.files.back().relative_path = "missing";
+  EXPECT_THROW(storage.UploadCheckpoint(invalid), std::invalid_argument);
+  invalid = valid;
+  invalid.files.back().destination = invalid.files.front().destination;
+  EXPECT_THROW(storage.UploadCheckpoint(invalid), std::invalid_argument);
+  for (const auto& key : std::vector<std::string>{"", "bad\nkey", "bad\rkey", std::string("bad\0key", 7), std::string(1025, 'x')}) {
+    invalid = valid;
+    invalid.files.back().destination.key = key;
+    EXPECT_THROW(storage.UploadCheckpoint(invalid), std::invalid_argument);
+  }
+  invalid = valid;
+  invalid.files.back().destination.bucket = "INVALID";
+  EXPECT_THROW(storage.UploadCheckpoint(invalid), std::invalid_argument);
 
+  fs::create_symlink(source / "data", source / "link");
+  EXPECT_THROW(storage.UploadCheckpoint(valid), std::runtime_error);
+  fs::remove(source / "link");
+  const auto link = temporary_.path() / "linked-root";
+  fs::create_directory_symlink(source, link);
+  invalid = valid;
+  invalid.source_directory = link / "";
+  EXPECT_THROW(storage.UploadCheckpoint(invalid), std::invalid_argument);
+  ASSERT_EQ(mkfifo((source / "fifo").c_str(), 0600), 0);
+  EXPECT_THROW(storage.UploadCheckpoint(valid), std::runtime_error);
+  fs::remove(source / "fifo");
 
+  // A sparse last file exercises the part-count limit without allocating it.
+  fs::resize_file(source / "last", limits_.part_size * 10000 + 1);
+  EXPECT_THROW(storage.UploadCheckpoint(valid), std::invalid_argument);
+  fs::resize_file(source / "last", 0);
+  // The host asserts no request at all used the preflight prefix.
+}
+
+TEST_F(S3RoundTripTest, RestoresAnEmptyDirectoryTreeWithoutObjects)
+{
+  const auto source = temporary_.path() / "empty-source";
+  fs::create_directories(source / "nested/empty");
+  fs::permissions(source / "nested/empty", fs::perms::owner_read | fs::perms::owner_exec);
+  S3StorageBackend storage(Config());
+  ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
+  const auto plan = storage.UploadCheckpoint({source, {}});
+  ASSERT_TRUE(plan.files.empty());
+  ASSERT_EQ(plan.directories.size(), 2);
+  restore_reader.Stage(plan, temporary_.path() / "empty-restore");
+  EXPECT_EQ(fs::status(temporary_.path() / "empty-restore/nested/empty").permissions(),
+            fs::status(source / "nested/empty").permissions());
+}
+
+TEST_F(S3RoundTripTest, PreservesPartialTreeFailureAndReusesBackend)
+{
+  const auto source = SingleFileTree("partial-source");
+  std::ofstream(source / "last") << "last file";
+  S3StorageBackend storage(Config());
+  ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
+  const S3CheckpointUploadPlan input{source, {{"data", Destination("engine-partial", "first")},
+                                             {"last", Destination("engine-partial", "bad")}}};
+  try {
+    storage.UploadCheckpoint(input);
+    FAIL() << "second object should be denied";
+  }
+  catch (const S3Error& error) {
+    EXPECT_EQ(error.destination.key, Destination("engine-partial", "bad").key);
+    EXPECT_EQ(error.primary.operation, "PutObject");
+    EXPECT_EQ(error.primary.http_status, 403);
+    EXPECT_EQ(error.cleanup_state, S3CleanupState::NOT_NEEDED);
+  }
+  EXPECT_TRUE(Barrier("engine-partial", "first"));
+  const auto plan = storage.UploadCheckpoint(UploadPlan(source, "engine-after-partial"));
+  EXPECT_NO_THROW(restore_reader.Stage(plan, temporary_.path() / "partial-recovered"));
+}
 
 TEST_F(S3RoundTripTest, RetriesTransientErrorsAndRejectsAccessDenial)
 {
@@ -406,8 +565,72 @@ TEST_F(S3RoundTripTest, ReportsLostInitiationWithoutClaimingCleanup)
   EXPECT_EQ(error.cleanup_state, S3CleanupState::UNCONFIRMED);
 }
 
+TEST_F(S3RoundTripTest, DetectsCorruptionThroughNativeReader)
+{
+  S3StorageBackend storage(Config());
+  ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
+  const auto source = SingleFileTree("integrity-source");
+  const auto corrupt = storage.UploadCheckpoint(UploadPlan(source, "corrupt"));
+  EXPECT_THROW(restore_reader.Stage(corrupt, temporary_.path() / "corrupt"), std::runtime_error);
+  EXPECT_EQ(fs::status(temporary_.path() / "corrupt/data").permissions(), fs::perms::owner_read | fs::perms::owner_write);
+  const auto good = storage.UploadCheckpoint(UploadPlan(source, "integrity-good"));
+  auto truncated = good;
+  ++truncated.files.front().size_bytes;
+  EXPECT_THROW(restore_reader.Stage(truncated, temporary_.path() / "truncated"), std::runtime_error);
+  EXPECT_EQ(fs::status(temporary_.path() / "truncated/data").permissions(), fs::perms::owner_read | fs::perms::owner_write);
+  EXPECT_NO_THROW(restore_reader.Stage(good, temporary_.path() / "integrity-recovered"));
+  EXPECT_EQ(utils::ComputeFileSha256(temporary_.path() / "integrity-recovered/data"), utils::ComputeFileSha256(source / "data"));
+}
 
+TEST_F(S3RoundTripTest, BoundsConcurrentUploadsAndIsolatesFailure)
+{
+  S3StorageBackend storage(Config());
+  ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
+  const auto source = SingleFileTree("concurrent-source", true);
+  const auto small = SingleFileTree("concurrent-small");
+  std::vector<std::future<RestorePlan>> uploads;
+  for (unsigned i = 0; i < 6; ++i)
+    uploads.push_back(std::async(std::launch::async, [&, i] {
+      return storage.UploadCheckpoint({source, {{"data", Destination("bounded", std::to_string(i))}}});
+    }));
+  auto failing = std::async(std::launch::async, [&] {
+    EXPECT_THROW(storage.UploadCheckpoint(UploadPlan(small, "concurrent-failure")), S3Error);
+  });
+  std::vector<std::future<void>> restores;
+  for (unsigned i = 0; i < uploads.size(); ++i) {
+    const auto destination = temporary_.path() / ("concurrent-" + std::to_string(i));
+    const auto plan = uploads[i].get();
+    restores.push_back(std::async(std::launch::async, [&, plan, destination] {
+      restore_reader.Stage(plan, destination);
+      EXPECT_EQ(utils::ComputeFileSha256(destination / "data"), utils::ComputeFileSha256(source / "data"));
+    }));
+  }
+  failing.get();
+  for (auto& restore : restores)
+    EXPECT_NO_THROW(restore.get());
+  // The host independently checks file admission; CRT schedules the HTTP parts.
+}
 
+TEST_F(S3RoundTripTest, RestoreContinuesWhileUploadIsBlocked)
+{
+  limits_.request_timeout = std::chrono::seconds(12);
+  S3StorageBackend storage(Config());
+  ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
+  const auto small = SingleFileTree("overlap-small");
+  const auto large = SingleFileTree("overlap-large", true);
+  const auto seed = storage.UploadCheckpoint(UploadPlan(small, "overlap-seed"));
+  auto upload = std::async(std::launch::async, [&] {
+    return storage.UploadCheckpoint(UploadPlan(large, "engine-overlap"));
+  });
+  EXPECT_TRUE(Barrier("wait", "engine-overlap"));
+  auto restore = std::async(std::launch::async, [&] {
+    restore_reader.Stage(seed, temporary_.path() / "overlap-restored");
+  });
+  EXPECT_EQ(restore.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  EXPECT_TRUE(Barrier("release", "engine-overlap"));
+  EXPECT_NO_THROW(restore.get());
+  EXPECT_NO_THROW(upload.get());
+}
 
 TEST_F(S3RoundTripTest, DeadlineDrainsAndReleasesResources)
 {
@@ -471,6 +694,33 @@ TEST_F(S3RoundTripTest, CancellationDrainsAndLeavesClientUsable)
   EXPECT_NO_THROW(uploader.UploadFile(fixture_ / "small", Destination("after-cancel")));
 }
 
+TEST_F(S3RoundTripTest, CoexistsWithReaderAndMultipleUploaderLifetimes)
+{
+  ModelStreamerRestore reader(ReaderOptions(), std::chrono::seconds(30));
+  RestorePlan reader_fixture;
+  reader_fixture.files.push_back({"s3://" + bucket_ + "/fixture/small", "data", fs::file_size(fixture_ / "small"),
+                                  fs::perms::owner_read, utils::ComputeFileSha256(fixture_ / "small")});
+  reader.Stage(reader_fixture, temporary_.path() / "before");
+  {
+    S3Client first(connection_, limits_);
+    {
+      auto provider = connection_;
+      provider.access_key_id.clear();
+      provider.secret_access_key.clear();
+      auto config = Config();
+      config.transfer.connection = provider;
+      S3StorageBackend second(config);
+      ModelStreamerRestore provider_reader({provider.region, provider.endpoint}, std::chrono::seconds(30));
+      const auto source = SingleFileTree("provider-source");
+      auto reading = std::async(std::launch::async, [&] { reader.Stage(reader_fixture, temporary_.path() / "during"); });
+      const auto plan = second.UploadCheckpoint(UploadPlan(source, "provider"));
+      EXPECT_NO_THROW(provider_reader.Stage(plan, temporary_.path() / "provider-restored"));
+      EXPECT_NO_THROW(reading.get());
+    }
+    EXPECT_NO_THROW(first.UploadFile(fixture_ / "small", Destination("after-second")));
+  }
+  EXPECT_NO_THROW(reader.Stage(reader_fixture, temporary_.path() / "after"));
+}
 
 TEST_F(S3RoundTripTest, RejectsUntrustedTLS)
 {
