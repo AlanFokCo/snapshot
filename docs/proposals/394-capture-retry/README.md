@@ -116,8 +116,8 @@ the cheapest recovery that fits:
 | Running, untouched | discard the attempt and start another |
 | Suspended, and can be dumped as it stands | dump again, leaving the GPU state alone |
 | Suspended, but the failed attempt left it unusable | revive it, then suspend and dump again |
-| Terminated, checkpoint staged | store again; no live workload is needed |
 | Terminated before a dump completed | the capture fails — nothing is left to retry from |
+| Terminated, checkpoint staged | store again; no live workload is needed |
 
 The second row is the one that matters most. Suspending a workload's GPU state
 is by far the expensive step, and a failed dump usually leaves that work done
